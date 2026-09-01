@@ -124,8 +124,9 @@ function parseSalesRecord(rowXml: string, index: number): EasyShopRecord | null 
   const rawAmount = fields[11] ?? "0";
   const originalApproval = fields[15] ?? "";
   const easyShopCancel = fields[24] ?? "";
+  const ifmType = fields[3] ?? "";
   const signedAmount = signedNumber(rawAmount);
-  const isCanceled = status.includes("취소") ||
+  const isCanceled = status.includes("취소") || ifmType === "0200" ||
     (cancelCode !== "" && !["0", "7"].includes(cancelCode)) ||
     signedAmount < 0 ||
     easyShopCancel.toUpperCase() === "Y" ||
@@ -134,7 +135,7 @@ function parseSalesRecord(rowXml: string, index: number): EasyShopRecord | null 
   return {
     transactionNo: fields[0] || `row-${index}`,
     terminalNo: fields[2] || "",
-    status,
+    status: status || (ifmType === "0200" ? "취소" : ifmType),
     occurredAt: compactDateToIso(rawDate),
     card: fields[6] || "",
     issuerName: fields[8] || "",
