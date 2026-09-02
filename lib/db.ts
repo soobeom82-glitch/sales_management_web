@@ -36,6 +36,13 @@ export async function ensureSchema() {
         event_count INTEGER NOT NULL DEFAULT 0,
         error TEXT
       )`;
+      await sql`CREATE TABLE IF NOT EXISTS monitor_job_locks (
+        job_name TEXT PRIMARY KEY,
+        locked_until TIMESTAMPTZ NOT NULL,
+        last_started_at TIMESTAMPTZ NOT NULL,
+        last_finished_at TIMESTAMPTZ,
+        last_error TEXT
+      )`;
       await sql`CREATE INDEX IF NOT EXISTS monitor_events_detected_at_idx ON monitor_events (detected_at DESC)`;
       await sql`CREATE INDEX IF NOT EXISTS monitor_runs_started_at_idx ON monitor_runs (started_at DESC)`;
     })();
@@ -43,7 +50,7 @@ export async function ensureSchema() {
   return schemaReady;
 }
 
-export async function insertEvent(event: MonitorEvent): Promise<number | null> {
+export async function reserveEventDelivery(event: MonitorEvent): Promise<number | null> {
   await ensureSchema();
   const sql = sqlClient();
   const rows = await sql`
@@ -52,10 +59,46 @@ export async function insertEvent(event: MonitorEvent): Promise<number | null> {
       ${event.source}, ${event.kind}, ${event.fingerprint}, ${event.title},
       ${event.occurredAt}, ${event.amount}, ${JSON.stringify(event.details)}::jsonb
     )
-    ON CONFLICT (fingerprint) DO NOTHING
+    ON CONFLICT (fingerprint) DO UPDATE
+    SET telegram_status = 'pending', telegram_error = NULL
+    WHERE monitor_events.telegram_status = 'failed'
     RETURNING id
   ` as unknown as { id: number }[];
   return rows[0]?.id ?? null;
+}
+
+export async function tryAcquireJobLock(jobName: string, leaseSeconds: number): Promise<boolean> {
+  await ensureSchema();
+  const sql = sqlClient();
+  const rows = await sql`
+    INSERT INTO monitor_job_locks (job_name, locked_until, last_started_at, last_finished_at, last_error)
+    VALUES (
+      ${jobName},
+      NOW() + (${leaseSeconds} * INTERVAL '1 second'),
+      NOW(),
+      NULL,
+      NULL
+    )
+    ON CONFLICT (job_name) DO UPDATE
+    SET
+      locked_until = NOW() + (${leaseSeconds} * INTERVAL '1 second'),
+      last_started_at = NOW(),
+      last_finished_at = NULL,
+      last_error = NULL
+    WHERE monitor_job_locks.locked_until <= NOW()
+    RETURNING job_name
+  ` as unknown as { job_name: string }[];
+  return rows.length > 0;
+}
+
+export async function releaseJobLock(jobName: string, error?: string) {
+  await ensureSchema();
+  const sql = sqlClient();
+  await sql`
+    UPDATE monitor_job_locks
+    SET locked_until = NOW(), last_finished_at = NOW(), last_error = ${error ?? null}
+    WHERE job_name = ${jobName}
+  `;
 }
 
 export async function recordRun(result: SourceCheckResult, startedAt: string, finishedAt: string) {

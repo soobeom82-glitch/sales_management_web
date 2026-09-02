@@ -2,8 +2,9 @@ const nonBlank = (value: string | undefined) => value?.trim() || "";
 
 export const config = {
   databaseUrl: nonBlank(process.env.DATABASE_URL),
-  cronSecret: nonBlank(process.env.CRON_SECRET),
   monitorAdminToken: nonBlank(process.env.MONITOR_ADMIN_TOKEN),
+  qstashCurrentSigningKey: nonBlank(process.env.QSTASH_CURRENT_SIGNING_KEY),
+  qstashNextSigningKey: nonBlank(process.env.QSTASH_NEXT_SIGNING_KEY),
   telegramBotToken: nonBlank(process.env.TELEGRAM_BOT_TOKEN),
   telegramChatId: nonBlank(process.env.TELEGRAM_CHAT_ID),
   vmms: {
@@ -29,6 +30,8 @@ export const config = {
 export function missingMonitorConfiguration(): string[] {
   const entries: Array<[string, string]> = [
     ["DATABASE_URL", config.databaseUrl],
+    ["QSTASH_CURRENT_SIGNING_KEY", config.qstashCurrentSigningKey],
+    ["QSTASH_NEXT_SIGNING_KEY", config.qstashNextSigningKey],
     ["TELEGRAM_BOT_TOKEN", config.telegramBotToken],
     ["TELEGRAM_CHAT_ID", config.telegramChatId],
     ["VMMS_LOGIN_ID", config.vmms.loginId],
@@ -38,4 +41,3 @@ export function missingMonitorConfiguration(): string[] {
   ];
   return entries.filter(([, value]) => !value).map(([key]) => key);
 }
-

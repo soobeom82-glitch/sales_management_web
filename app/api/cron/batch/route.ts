@@ -1,21 +1,20 @@
-import { config } from "@/lib/config";
 import { runBatchJob } from "@/lib/batch/run-batch-job";
+import { verifyQStashRequest } from "@/lib/qstash";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 export async function POST(request: Request) {
-  const authorization = request.headers.get("authorization");
-  if (!config.monitorAdminToken || authorization !== `Bearer ${config.monitorAdminToken}`) {
+  if (!(await verifyQStashRequest(request))) {
     return Response.json({ ok: false, error: "Unauthorized" }, { status: 401 });
   }
 
   try {
     const result = await runBatchJob();
-    return Response.json({ ok: true, result });
+    return Response.json({ ok: true, ...result });
   } catch (error) {
     return Response.json(
-      { ok: false, error: error instanceof Error ? error.message : "Monitor failed" },
+      { ok: false, error: error instanceof Error ? error.message : "Batch failed" },
       { status: 500 },
     );
   }

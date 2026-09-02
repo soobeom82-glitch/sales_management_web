@@ -1,4 +1,4 @@
-import { insertEvent, recordRun, updateTelegramDelivery } from "@/lib/db";
+import { recordRun, reserveEventDelivery, updateTelegramDelivery } from "@/lib/db";
 import { checkEasyShopCancellations } from "@/lib/sources/easyshop";
 import { checkVmmsBulkPurchases } from "@/lib/sources/vmms";
 import { sendTelegramAlert } from "@/lib/telegram";
@@ -9,12 +9,13 @@ export async function runMonitor(): Promise<MonitorRunResult> {
   const checks = await Promise.all([checkVmmsBulkPurchases(), checkEasyShopCancellations()]);
   let insertedEvents = 0;
   let telegramSent = 0;
+  const deliveryErrors: string[] = [];
 
   for (const check of checks) {
     const finishedAt = new Date().toISOString();
     await recordRunSafely(check, startedAt, finishedAt);
     for (const event of check.events) {
-      const id = await insertEvent(event);
+      const id = await reserveEventDelivery(event);
       if (id === null) continue;
       insertedEvents += 1;
       try {
@@ -22,10 +23,18 @@ export async function runMonitor(): Promise<MonitorRunResult> {
         await updateTelegramDelivery(id, "sent");
         telegramSent += 1;
       } catch (error) {
-        await updateTelegramDelivery(id, "failed", readableError(error));
+        const message = readableError(error);
+        await updateTelegramDelivery(id, "failed", message);
+        deliveryErrors.push(`${check.source} 텔레그램 전송 실패: ${message}`);
       }
     }
   }
+
+  const sourceErrors = checks
+    .filter((check) => check.error)
+    .map((check) => `${check.source} 조회 실패: ${check.error}`);
+  const failures = [...sourceErrors, ...deliveryErrors];
+  if (failures.length > 0) throw new Error(failures.join(" | "));
 
   return { startedAt, finishedAt: new Date().toISOString(), sources: checks, insertedEvents, telegramSent };
 }
@@ -42,4 +51,3 @@ async function recordRunSafely(check: SourceCheckResult, startedAt: string, fini
 function readableError(error: unknown) {
   return error instanceof Error ? error.message : "알 수 없는 오류";
 }
-
