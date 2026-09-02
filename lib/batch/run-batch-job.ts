@@ -19,22 +19,23 @@ export type BatchJobResult = {
 
 export async function runBatchJob(): Promise<BatchJobResult> {
   const startedAt = new Date();
-  const acquired = await tryAcquireJobLock(JOB_NAME, LOCK_LEASE_SECONDS);
-  if (!acquired) {
-    const finishedAt = new Date();
-    console.info(`[batch] skipped reason=already_running startedAt=${startedAt.toISOString()} finishedAt=${finishedAt.toISOString()}`);
-    return {
-      startedAt: startedAt.toISOString(),
-      finishedAt: finishedAt.toISOString(),
-      durationMs: finishedAt.getTime() - startedAt.getTime(),
-      skipped: true,
-      reason: "already_running",
-      processedCount: 0,
-    };
-  }
-
+  let acquired = false;
   let failureMessage: string | undefined;
   try {
+    acquired = await tryAcquireJobLock(JOB_NAME, LOCK_LEASE_SECONDS);
+    if (!acquired) {
+      const finishedAt = new Date();
+      console.info(`[batch] skipped reason=already_running startedAt=${startedAt.toISOString()} finishedAt=${finishedAt.toISOString()}`);
+      return {
+        startedAt: startedAt.toISOString(),
+        finishedAt: finishedAt.toISOString(),
+        durationMs: finishedAt.getTime() - startedAt.getTime(),
+        skipped: true,
+        reason: "already_running",
+        processedCount: 0,
+      };
+    }
+
     console.info(`[batch] started startedAt=${startedAt.toISOString()}`);
     const result = await runMonitor();
     const finishedAt = new Date();
@@ -64,9 +65,11 @@ export async function runBatchJob(): Promise<BatchJobResult> {
     );
     throw error;
   } finally {
-    await releaseJobLock(JOB_NAME, failureMessage).catch((error) => {
-      console.error(`[batch] lock release failed error=${readableError(error)}`);
-    });
+    if (acquired) {
+      await releaseJobLock(JOB_NAME, failureMessage).catch((error) => {
+        console.error(`[batch] lock release failed error=${readableError(error)}`);
+      });
+    }
   }
 }
 
