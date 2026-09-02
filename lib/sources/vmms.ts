@@ -15,7 +15,10 @@ export async function checkVmmsBulkPurchases(): Promise<SourceCheckResult> {
 
     const jar = new CookieJar();
     await login(jar);
-    const rows = await fetchAllTodayRows(jar);
+    const reconcile = isVmmsDailyReconciliationTime();
+    // The VMMS endpoint has no time-range parameter. Normal polls inspect the
+    // newest page only; the final poll of the day reconciles every page.
+    const rows = reconcile ? await fetchAllTodayRows(jar) : await fetchRecentRows(jar);
     const events = rows
       .filter(isBulkPurchase)
       .map(toMonitorEvent);
@@ -23,7 +26,11 @@ export async function checkVmmsBulkPurchases(): Promise<SourceCheckResult> {
       source: "vmms",
       checkedAt,
       events,
-      metadata: { scannedTransactions: rows.length, matchedTransactions: events.length },
+      metadata: {
+        scannedTransactions: rows.length,
+        matchedTransactions: events.length,
+        reconciliation: reconcile,
+      },
     };
   } catch (error) {
     return {
@@ -63,6 +70,10 @@ async function fetchAllTodayRows(jar: CookieJar): Promise<VmmsRow[]> {
     rows.push(...result.rows);
   }
   return rows;
+}
+
+async function fetchRecentRows(jar: CookieJar): Promise<VmmsRow[]> {
+  return (await fetchPage(jar, 1)).rows;
 }
 
 async function fetchPage(jar: CookieJar, pageNo: number): Promise<{ rows: VmmsRow[]; total: unknown }> {
@@ -158,6 +169,14 @@ function todayCompact() {
   }).formatToParts(new Date());
   const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
   return `${get("year")}${get("month")}${get("day")}`;
+}
+
+function isVmmsDailyReconciliationTime() {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date());
+  const part = (type: string) => Number(parts.find((item) => item.type === type)?.value ?? "0");
+  return part("hour") === 23 && part("minute") >= 55;
 }
 
 function vmmsDateToIso(raw: string): string | null {

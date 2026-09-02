@@ -21,6 +21,14 @@ type EasyShopRecord = {
   isCanceled: boolean;
 };
 
+type SalesWindow = {
+  date: string;
+  fromTime: string;
+  toTime: string;
+};
+
+const EASYSHOP_LOOKBACK_MINUTES = 15;
+
 export async function checkEasyShopCancellations(): Promise<SourceCheckResult> {
   const checkedAt = new Date().toISOString();
   try {
@@ -30,13 +38,17 @@ export async function checkEasyShopCancellations(): Promise<SourceCheckResult> {
 
     const jar = new CookieJar();
     const context = await loginAndLoadContext(jar);
-    const records = await fetchTodaySales(jar, context);
+    const records = await fetchRecentSales(jar, context);
     const events = records.filter((record) => record.isCanceled).map(toMonitorEvent);
     return {
       source: "easyshop",
       checkedAt,
       events,
-      metadata: { scannedTransactions: records.length, matchedTransactions: events.length },
+      metadata: {
+        scannedTransactions: records.length,
+        matchedTransactions: events.length,
+        lookbackMinutes: EASYSHOP_LOOKBACK_MINUTES,
+      },
     };
   } catch (error) {
     return {
@@ -142,13 +154,17 @@ async function primeSalesAuthorization(jar: CookieJar, memberId: string, autId: 
   }
 }
 
-async function fetchTodaySales(jar: CookieJar, context: EasyShopContext): Promise<EasyShopRecord[]> {
-  const session = refreshSessionCookies(jar);
-  const responseXml = await callService(jar, buildSalesXml(context, session));
-  assertNoServiceError(responseXml, "EasyShop 오늘 매출 조회");
-  return extractDatasetRows(responseXml, "data")
-    .map((row, index) => parseSalesRecord(row, index))
-    .filter((record): record is EasyShopRecord => record !== null);
+async function fetchRecentSales(jar: CookieJar, context: EasyShopContext): Promise<EasyShopRecord[]> {
+  const records: EasyShopRecord[] = [];
+  for (const window of recentSalesWindows()) {
+    const session = refreshSessionCookies(jar);
+    const responseXml = await callService(jar, buildSalesXml(context, session, window));
+    assertNoServiceError(responseXml, "EasyShop 최근 매출 조회");
+    records.push(...extractDatasetRows(responseXml, "data")
+      .map((row, index) => parseSalesRecord(row, index))
+      .filter((record): record is EasyShopRecord => record !== null));
+  }
+  return uniqueRecords(records);
 }
 
 async function callService(jar: CookieJar, body: string): Promise<string> {
@@ -305,16 +321,17 @@ function buildContextServiceXml(
     <Dataset id="dsInData"><ColumnInfo>${columns}</ColumnInfo><Rows><Row>${rows}</Row></Rows></Dataset>`);
 }
 
-function buildSalesXml(context: EasyShopContext, session: SessionValues) {
-  const today = compactToday();
+function buildSalesXml(context: EasyShopContext, session: SessionValues, window: SalesWindow) {
   // EasyShop validates this dynamic-query dataset shape server-side. Keep the
   // columns and populated fields aligned with the browser request exactly.
   const valueRows: Record<string, string | null> = {
     SvcId: "TESS103S01",
     func_cd: "3",
     gubun: "0",
-    retrv_dt01: today,
-    retrv_dt02: today,
+    retrv_dt01: window.date,
+    retrv_dt02: window.date,
+    trx_tm: window.fromTime,
+    trx_tm2: window.toTime,
     bizr_no: context.bizrNo,
     tid: context.tid,
     trx_resp_cd: "0000",
@@ -385,12 +402,44 @@ function getParameter(xml: string, id: string) {
   return decodeXml(new RegExp(`<Parameter\\s+id="${id}"[^>]*>([\\s\\S]*?)<\\/Parameter>`, "i").exec(xml)?.[1] ?? "").trim();
 }
 
-function compactToday() {
+function recentSalesWindows(): SalesWindow[] {
+  const now = new Date();
+  const from = new Date(now.getTime() - EASYSHOP_LOOKBACK_MINUTES * 60 * 1000);
+  const fromDate = compactKstDate(from);
+  const toDate = compactKstDate(now);
+  if (fromDate === toDate) {
+    return [{ date: toDate, fromTime: compactKstTime(from), toTime: compactKstTime(now) }];
+  }
+  return [
+    { date: fromDate, fromTime: compactKstTime(from), toTime: "23:59:59" },
+    { date: toDate, fromTime: "00:00:00", toTime: compactKstTime(now) },
+  ];
+}
+
+function uniqueRecords(records: EasyShopRecord[]) {
+  const seen = new Set<string>();
+  return records.filter((record) => {
+    const key = [record.transactionNo, record.terminalNo, record.approvalNo, record.occurredAt, record.amount].join(":");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function compactKstDate(date: Date) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit",
-  }).formatToParts(new Date());
+  }).formatToParts(date);
   const part = (name: string) => parts.find((item) => item.type === name)?.value ?? "";
   return `${part("year")}${part("month")}${part("day")}`;
+}
+
+function compactKstTime(date: Date) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  }).formatToParts(date);
+  const part = (name: string) => parts.find((item) => item.type === name)?.value ?? "00";
+  return `${part("hour")}:${part("minute")}:${part("second")}`;
 }
 
 function compactDateToIso(value: string): string | null {
