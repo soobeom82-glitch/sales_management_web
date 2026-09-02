@@ -240,10 +240,10 @@ function buildSimpleServiceXml(
 
 function buildSalesXml(context: EasyShopContext, session: SessionValues) {
   const today = compactToday();
-  const valueRows: Record<string, string> = {
+  // EasyShop validates this dynamic-query dataset shape server-side. Keep the
+  // columns and populated fields aligned with the browser request exactly.
+  const valueRows: Record<string, string | null> = {
     SvcId: "TESS103S01",
-    user_id: config.easyShop.loginId,
-    aut_id: context.autId,
     func_cd: "3",
     gubun: "0",
     retrv_dt01: today,
@@ -253,7 +253,7 @@ function buildSalesXml(context: EasyShopContext, session: SessionValues) {
     trx_resp_cd: "0000",
     fromPageNo: "0",
     endPageNo: "1000",
-    cardno2: "",
+    cardno2: null,
     sql_con: SQL_CON,
     sql_alias: SQL_ALIAS,
     excp_yn: "0",
@@ -261,10 +261,13 @@ function buildSalesXml(context: EasyShopContext, session: SessionValues) {
     rowCnt: "0",
     rowCnt02: "0",
   };
-  const columns = Object.keys(valueRows)
-    .map((name) => `<Column id="${name}" type="STRING" size="256"/>`).join("");
+  const columns = EASYSHOP_SALES_COLUMNS
+    .map(({ id, type, size }) => `<Column id="${id}" type="${type}" size="${size}"  />`).join("");
   const row = Object.entries(valueRows)
-    .map(([name, value]) => `<Col id="${name}">${xmlEscape(value)}</Col>`).join("");
+    .map(([name, value]) => value === null
+      ? `<Col id="${name}" />`
+      : `<Col id="${name}">${xmlEscape(value)}</Col>`)
+    .join("");
   return xmlRoot(`
     ${commonParameters("div_Work", context.memberId, session)}
     <Dataset id="dsInData"><ColumnInfo>${columns}</ColumnInfo><Rows><Row>${row}</Row></Rows></Dataset>
@@ -373,6 +376,19 @@ function xmlHeaders(referer: string): HeadersInit {
 
 const USER_AGENT = "Mozilla/5.0 (compatible; SalesManagementMonitor/1.0)";
 
-// The application uses EasyShop's TESS103S01 dataset shape from the verified Android request.
-const SQL_CON = "NVL(trx_natr_no,' ') as trx_natr_no,NVL(trx_can_cl_cd,' ') as trx_can_cl_cd,NVL(slip_no,' ') as slip_no,NVL(ifm_typ_cd,' ') as ifm_typ_cd,NVL(trx_dt||trx_tm,' ') as trx_dtm,NVL(tid,' ') as tid,NVL(cardno,' ') as cardno,NVL(card_typ_flag,' ') as card_typ_cd,NVL(iss_fm_nm,' ') as iss_fm_nm,NVL(purch_fm_cd,' ') as purch_fm_nm,NVL(jo_shop_no,' ') as jo_shop_no,NVL(tot_trx_amt,0) as tot_trx_amt,NVL(alot_months_cnt,' ') as alot_months_cnt,NVL(aprv_no,' ') as aprv_no,NVL(trx_mthd_cd,' ') as trx_mthd_cd,NVL(orgnl_aprv_dt,' ') as orgnl_aprv_dt,NVL(pay_plan_dt,' ') as pay_plan_dt,NVL(trx_resp_cd,' ') as trx_resp_cd,NVL(sign_yn,' ') as sign_yn,NVL(req_fee,0) as req_fee,NVL(req_inv_yn,' ') as req_inv_yn,NVL(req_ret_yn,' ') as req_ret_yn,NVL(req_pay_plan_amt,0) as req_pay_plan_amt,NVL(req_pur_yn,' ') as req_pur_yn,NVL(es_can_yn,' ') as es_can_yn,NVL(can_dt,' ') as can_dt";
-const SQL_ALIAS = "trx_natr_no||'@@'||trx_can_cl_cd||'@@'||slip_no||'@@'||ifm_typ_cd||'@@'||trx_dtm||'@@'||tid||'@@'||cardno||'@@'||card_typ_cd||'@@'||iss_fm_nm||'@@'||purch_fm_nm||'@@'||jo_shop_no||'@@'||tot_trx_amt||'@@'||alot_months_cnt||'@@'||aprv_no||'@@'||trx_mthd_cd||'@@'||orgnl_aprv_dt||'@@'||pay_plan_dt||'@@'||trx_resp_cd||'@@'||sign_yn||'@@'||req_fee||'@@'||req_inv_yn||'@@'||req_ret_yn||'@@'||req_pay_plan_amt||'@@'||req_pur_yn||'@@'||es_can_yn||'@@'||can_dt";
+const EASYSHOP_SALES_COLUMNS = [
+  "SvcId", "user_id", "aut_id", "func_cd", "gubun", "retrv_dt01", "retrv_dt02", "bizr_no", "tid",
+  "aprv_no", "cardno", "iss_fm_nm", "purch_fm_nm", "fin_org_cd", "jo_shop_no", "tot_trx_amt",
+  "tot_trx_amt2", "s_alot_months_cnt", "s_alot_months_cnt2", "trx_tm", "trx_tm2", "trx_can_cl_cd",
+  "trx_resp_cd", "oil", "fromPageNo", "endPageNo", "remk", "remk2", "remk_1", "remk_2", "trx_typ",
+  "cardno2", "max_no", "itm_tit2", "itm_sz", "itm_fmt", "itm_mode", "itm_align", "sql_con", "sql_alias",
+  "gid", "card_typ_flag", "excp_yn", "trx_dt", "aply_yn",
+].map((id) => ({ id, type: "STRING", size: "256" })).concat([
+  { id: "rowCnt", type: "BIGDECIMAL", size: "12" },
+  { id: "rowCnt02", type: "BIGDECIMAL", size: "12" },
+]);
+
+// The browser sends a server-approved dynamic select expression for TESS103S01.
+// Its exact field order is required by EasyShop's anti-tampering validation.
+const SQL_CON = "NVL(trx_natr_no,' ') as trx_natr_no, NVL(trx_can_cl_cd,' ') as trx_can_cl_cd, NVL(slip_no,' ') as slip_no, NVL(case when trx_resp_cd='0000' and trx_can_cl_cd not in ('0', '7') then '통신취소' when ifm_typ_cd='0100' and trx_resp_cd='0000' and trx_can_yn='C' then '승인원거래' when ifm_typ_cd='0200' and trx_resp_cd='0000' and trx_can_yn='C' then '취소원거래' when m_gd_cd='LC' then '조회' when trx_resp_cd!='0000' then '거절' when ifm_typ_cd='0100' then '승인' when ifm_typ_cd='0200' and trx_resp_cd='0000' and trx_cl_cd='TI' then '전화취소' when ifm_typ_cd='0200' and trx_resp_cd='0000' and trx_dt<>orgnl_aprv_dt then '취소' when ifm_typ_cd='0200' then '취소' when ifm_typ_cd is null then ' ' end,' ') as ifm_typ_cd, NVL(trx_dt||trx_tm,' ') as trx_dtm, NVL(nvl(tid, ' '),' ') as tid, NVL(cardno,' ') as cardno, NVL(decode(nvl(card_typ_flag,'N'), 'Y', '체크','G','기프트','신용'),' ') as card_typ_cd, NVL(iss_fm_nm,' ') as iss_fm_nm, NVL(GET_FIN_ORG_NM('F01', purch_fm_cd),' ') as purch_fm_nm, NVL(jo_shop_no,' ') as jo_shop_no, case when ifm_typ_cd='0200' and trx_resp_cd='0000' and aut_yn = 'Y' then nvl(-tot_trx_amt,0) else nvl(tot_trx_amt,0) end as tot_trx_amt, NVL(case when alot_months_cnt='0' then '일시불' when to_char(alot_months_cnt) <> '0' then alot_months_cnt||'개월' else to_char(alot_months_cnt) end,' ') as alot_months_cnt, NVL(aprv_no,' ') as aprv_no, NVL(decode(trx_mthd_cd, '2', 'Y', 'K', 'Y', 'N'),' ') as trx_mthd_cd, NVL(decode(trim(orgnl_aprv_dt), '20', '', '', '', '000000', '', '00000000', '', '20000000', '', decode(substr(orgnl_aprv_dt, 7, 1), '', '20'||orgnl_aprv_dt, orgnl_aprv_dt)),' ') as orgnl_aprv_dt, NVL(DECODE(HNDL_ST_DTL_CD,'60',PAY_PLAN_DT,'63',PAY_PLAN_DT,'66',PAY_PLAN_DT,'67',PAY_PLAN_DT,NULL),' ') as pay_plan_dt, NVL(get_com_cd_nm('TRN_C00002', trx_resp_cd),' ') as trx_resp_cd, NVL(decode(btr_sign_chk_2(mkr_cd, etc_sign_flag, purch_fm_cd, trx_resp_cd, tat_ddc_flag, tat_edc_flag, tat_dcc_rgst_cd), 0, 'Y', DECODE (trm_typ_cd, 'MS', 'Y','N')),' ') as sign_yn, decode(bizr_no,'1168119948','0',req_fee) as req_fee, NVL(req_inv_yn,' ') as req_inv_yn, NVL(req_ret_yn,' ') as req_ret_yn, decode(bizr_no,'1168119948','0',req_pay_plan_amt) as req_pay_plan_amt, NVL(req_pur_yn,' ') as req_pur_yn, NVL(es_can_yn,' ') as es_can_yn, NVL(can_dt,' ') as can_dt, NVL(GET_COM_CD_NM('TRN_C00226',CL),' ') as simp_pay_cl_nm";
+const SQL_ALIAS = "trx_natr_no||'@@'||trx_can_cl_cd||'@@'||slip_no||'@@'||ifm_typ_cd||'@@'||trx_dtm||'@@'||tid||'@@'||cardno||'@@'||card_typ_cd||'@@'||iss_fm_nm||'@@'||purch_fm_nm||'@@'||jo_shop_no||'@@'||tot_trx_amt||'@@'||alot_months_cnt||'@@'||aprv_no||'@@'||trx_mthd_cd||'@@'||orgnl_aprv_dt||'@@'||pay_plan_dt||'@@'||trx_resp_cd||'@@'||sign_yn||'@@'||req_fee||'@@'||req_inv_yn||'@@'||req_ret_yn||'@@'||req_pay_plan_amt||'@@'||req_pur_yn||'@@'||es_can_yn||'@@'||can_dt||'@@'||simp_pay_cl_nm";
