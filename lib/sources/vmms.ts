@@ -4,6 +4,8 @@ import type { MonitorEvent, SourceCheckResult } from "@/lib/types";
 
 type VmmsRow = Record<string, unknown>;
 
+const VMMS_PAGE_SIZE = 100;
+
 export async function checkVmmsBulkPurchases(): Promise<SourceCheckResult> {
   const checkedAt = new Date().toISOString();
   try {
@@ -52,7 +54,9 @@ async function login(jar: CookieJar) {
 
 async function fetchAllTodayRows(jar: CookieJar): Promise<VmmsRow[]> {
   const first = await fetchPage(jar, 1);
-  const totalPages = Math.max(1, toNumber(first.totalPages, 1));
+  // VMMS returns `total`, not `totalPages`. Without this calculation only the
+  // first 100 transactions were checked, which could hide an earlier item.
+  const totalPages = Math.max(1, Math.ceil(toNumber(first.total, first.rows.length) / VMMS_PAGE_SIZE));
   const rows = [...first.rows];
   for (let page = 2; page <= totalPages; page += 1) {
     const result = await fetchPage(jar, page);
@@ -61,7 +65,7 @@ async function fetchAllTodayRows(jar: CookieJar): Promise<VmmsRow[]> {
   return rows;
 }
 
-async function fetchPage(jar: CookieJar, pageNo: number): Promise<{ rows: VmmsRow[]; totalPages: unknown }> {
+async function fetchPage(jar: CookieJar, pageNo: number): Promise<{ rows: VmmsRow[]; total: unknown }> {
   const base = config.vmms.baseUrl.replace(/\/$/, "");
   const date = todayCompact();
   const url = new URL(`${base}/sales/RealTime/list.do`);
@@ -79,7 +83,7 @@ async function fetchPage(jar: CookieJar, pageNo: number): Promise<{ rows: VmmsRo
     type: "A",
     pageType: "realTime",
     pageNo: String(pageNo),
-    pageSize: "100",
+    pageSize: String(VMMS_PAGE_SIZE),
   };
   for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
   const response = await jar.fetch(url, {
@@ -93,15 +97,15 @@ async function fetchPage(jar: CookieJar, pageNo: number): Promise<{ rows: VmmsRo
   if (body.trimStart().startsWith("<") || /<title[^>]*>.*login/i.test(body)) {
     throw new Error("VMMS 세션이 유지되지 않았습니다.");
   }
-  let parsed: { data?: unknown; totalPages?: unknown };
+  let parsed: { data?: unknown; total?: unknown };
   try {
-    parsed = JSON.parse(body) as { data?: unknown; totalPages?: unknown };
+    parsed = JSON.parse(body) as { data?: unknown; total?: unknown };
   } catch {
     throw new Error("VMMS 거래조회 응답 형식이 JSON이 아닙니다.");
   }
   return {
     rows: Array.isArray(parsed.data) ? parsed.data.filter(isRecord) : [],
-    totalPages: parsed.totalPages,
+    total: parsed.total,
   };
 }
 
@@ -181,4 +185,3 @@ function toNumber(value: unknown, fallback: number): number {
 function isRecord(value: unknown): value is VmmsRow {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-
