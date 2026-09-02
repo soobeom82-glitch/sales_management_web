@@ -52,10 +52,14 @@ async function loginAndLoadContext(jar: CookieJar): Promise<EasyShopContext> {
   const base = config.easyShop.baseUrl.replace(/\/$/, "");
   await jar.fetch(`${base}/smart_kicc/index.jsp`, { headers: htmlHeaders(`${base}/`) });
 
+  // Keep the login handshake in the same order as EasyShop's Nexacro client.
+  await checkLoginStatus(jar);
+  const loginSession = refreshSessionCookies(jar);
+
   const loginResponse = await jar.fetch(`${base}/login.do`, {
     method: "POST",
     headers: xmlHeaders(`${base}/smart_kicc/index.jsp`),
-    body: buildLoginXml(config.easyShop.loginId, config.easyShop.loginPassword),
+    body: buildLoginXml(config.easyShop.loginId, config.easyShop.loginPassword, loginSession),
   });
   const loginXml = await loginResponse.text();
   if (!loginResponse.ok) throw new Error(`EasyShop 로그인 요청 실패 (${loginResponse.status})`);
@@ -64,32 +68,77 @@ async function loginAndLoadContext(jar: CookieJar): Promise<EasyShopContext> {
   const memberId = getColumn(loginXml, "mbr_id") || config.easyShop.memberId;
   if (!memberId) throw new Error("EasyShop 로그인 응답에서 mbr_id를 찾지 못했습니다.");
 
-  const session = refreshSessionCookies(jar);
-  // Android에서 검증된 화면 진입 순서를 서버 요청에도 적용한다.
-  await preloadContext(jar, memberId, session);
-  const authXml = await callService(jar, buildAuthContextXml(memberId, session));
+  await bootstrapEasyShopContext(jar, memberId);
+  const authXml = await callContextService(jar, memberId, "Login", "TCMM001S02", [
+    field("login_id", config.easyShop.loginId),
+    field("group_yn", "N"),
+  ]);
   assertNoServiceError(authXml, "EasyShop 권한 확인");
 
   const autId = getColumn(authXml, "aut_id") || config.easyShop.autId;
+  if (!autId) throw new Error("EasyShop 권한 확인 응답에서 aut_id를 찾지 못했습니다.");
   const bizrNo = getCodeValue(authXml, "BIZR_NO") || config.easyShop.bizrNo;
   const tid = getCodeValue(authXml, "TID") || config.easyShop.tid;
+  await primeSalesAuthorization(jar, memberId, autId);
   return { memberId, autId, bizrNo, tid };
 }
 
-async function preloadContext(jar: CookieJar, memberId: string, session: SessionValues) {
+async function checkLoginStatus(jar: CookieJar) {
+  const base = config.easyShop.baseUrl.replace(/\/$/, "");
+  const response = await jar.fetch(`${base}/checkLoginStatus.do`, {
+    method: "POST",
+    headers: xmlHeaders(`${base}/smart_kicc/index.jsp`),
+    body: xmlRoot(`
+      <Parameters><Parameter id="LoginInfo"/><Parameter id="arg_pgmId">Login</Parameter><Parameter id="nMbr_id">undefined</Parameter></Parameters>
+      <Dataset id="dsInData"><ColumnInfo>
+        <Column id="SvcId" type="STRING" size="256"/><Column id="gubun" type="STRING" size="2"/>
+        <Column id="login_id" type="STRING" size="20"/><Column id="pswd" type="STRING" size="50"/>
+      </ColumnInfo><Rows><Row><Col id="gubun">0</Col></Row></Rows></Dataset>
+    `),
+  });
+  const xml = await response.text();
+  if (!response.ok) throw new Error(`EasyShop 로그인 상태 확인 요청 실패 (${response.status})`);
+  assertNoServiceError(xml, "EasyShop 로그인 상태 확인");
+}
+
+async function bootstrapEasyShopContext(jar: CookieJar, memberId: string) {
   const loginId = config.easyShop.loginId;
-  const calls = [
-    buildSimpleServiceXml("TCMM100S05", memberId, session, { gubun: "0", login_id: loginId }),
-    buildSimpleServiceXml("TPOE201S11", memberId, session, { func_cd: "0", login_id: loginId }),
-    buildSimpleServiceXml("TCMM100S02", memberId, session, { gubun: "1", mbr_id: memberId, url_path: "SEO" }),
-    buildSimpleServiceXml("TCMM100S03", memberId, session, {
-      rowCnt: "1", func_cd: "1", mbr_id: memberId, pgm_id: "WESS102T01",
-      fst_rgtr_id: memberId, lst_updr_id: memberId, url_path: "SEO",
-    }),
+  const calls: Array<[string, string, ContextField[]]> = [
+    ["Login", "TCMM100S05", [field("gubun", "0"), field("login_id", loginId), field("ctz_no", null)]],
+    ["Login", "TPOE201S11", [field("func_cd", "0"), field("login_id", loginId)]],
+    ["Login", "TCMM100S08", [field("mbr_id", memberId)]],
+    ["MainFrameEs", "TESS501S01", [field("login_id", loginId), field("func_cd", "0", "BIGDECIMAL", "2")]],
+    ["MainFrameEs", "TESS501S02", [field("login_id", loginId)]],
+    ["MainFrameEs", "TESS501S03", [field("login_id", loginId)]],
+    ["MainFrameEs", "TESS501S04", [field("message", null)]],
+    ["MainFrameEs", "TESS100S01", [field("func_cd", "3", "BIGDECIMAL", "2")]],
+    ["MainFrameEs", "TESS501S01", [field("login_id", loginId), field("func_cd", "1", "BIGDECIMAL", "2")]],
+    ["MainFrameEs", "TESS501S01", [field("login_id", loginId), field("func_cd", "2", "BIGDECIMAL", "2")]],
+    ["LeftFrame", "TCMM100S02", [field("gubun", "1", "STRING", "2"), field("mbr_id", memberId, "STRING", "200"), field("url_path", "SEO")]],
+    ["MainFrameEs", "TESS100S01", [field("func_cd", "1", "BIGDECIMAL", "2")]],
+    ["MDIFrame", "TMCM990S01", [field("login_id", memberId, "STRING", "10"), field("menu_id", "1000007726", "STRING", "20"), field("login_mthd_cd", "5", "STRING", "1")]],
   ];
-  for (const xml of calls) {
-    // 보조 컨텍스트 요청은 서버별 권한 차이가 있으므로 실패해도 본 조회에서 최종 판단한다.
-    await callService(jar, xml).catch(() => undefined);
+  for (const [argPgmId, serviceId, fields] of calls) {
+    const xml = await callContextService(jar, memberId, argPgmId, serviceId, fields);
+    assertNoServiceError(xml, `EasyShop 화면 초기화(${serviceId})`);
+  }
+}
+
+async function primeSalesAuthorization(jar: CookieJar, memberId: string, autId: string) {
+  const calls: Array<[string, ContextField[]]> = [
+    ["TCMM100S03", [
+      field("rowCnt", "1", "INT"), field("func_cd", "1", "INT"), field("mbr_id", memberId),
+      field("pgm_id", "WESS102T01"), field("grid_nm", null), field("grid_layout", null),
+      field("fst_rgtr_id", memberId), field("lst_updr_id", memberId), field("gubun", null, "INT"), field("url_path", "SEO"),
+    ]],
+    ["TCMM001S10", [field("menu_id", "1000007727"), field("aut_id", autId)]],
+    ["TCMM001S10", [field("menu_id", "1000008225"), field("aut_id", autId)]],
+    ["TCMM001S03", [field("aut_id", autId)]],
+    ["TCMM116S01", [field("key_value", "MCM_B00002"), field("gubun", "10")]],
+  ];
+  for (const [serviceId, fields] of calls) {
+    const xml = await callContextService(jar, memberId, "div_Work", serviceId, fields);
+    assertNoServiceError(xml, `EasyShop 매출 권한 초기화(${serviceId})`);
   }
 }
 
@@ -177,7 +226,8 @@ function refreshSessionCookies(jar: CookieJar): SessionValues {
   const now = Date.now();
   const expiry = now + 2 * 60 * 60 * 1000;
   const values = {
-    clientTimeOffset: "-540",
+    // EasyShop's Nexacro client supplies this session offset during login.
+    clientTimeOffset: "66",
     latestTouch: String(now),
     sessionExpiry: String(expiry),
     remainTime: String(expiry - now),
@@ -187,55 +237,72 @@ function refreshSessionCookies(jar: CookieJar): SessionValues {
   return values;
 }
 
-function buildLoginXml(loginId: string, password: string) {
+function buildLoginXml(loginId: string, password: string, session: SessionValues) {
   return xmlRoot(`
+    ${commonParameters("Login", "undefined", session)}
     <Dataset id="dsInData">
       <ColumnInfo>
-        <Column id="SvcId" type="STRING" size="256"/>
-        <Column id="gubun" type="STRING" size="2"/>
-        <Column id="login_id" type="STRING" size="20"/>
-        <Column id="pswd" type="STRING" size="50"/>
+        <Column id="SvcId" type="STRING" size="256"  />
+        <Column id="gubun" type="STRING" size="2"  />
+        <Column id="login_id" type="STRING" size="20"  />
+        <Column id="pswd" type="STRING" size="50"  />
+        <Column id="ctz_no" type="STRING" size="13"  />
+        <Column id="ip_addr" type="STRING" size="23"  />
+        <Column id="cert_dn" type="STRING" size="408"  />
+        <Column id="otp_login_cd" type="STRING" size="1"  />
+        <Column id="otpYn" type="STRING" size="256"  />
+        <Column id="txtID" type="STRING" size="256"  />
+        <Column id="txtOtp" type="STRING" size="256"  />
       </ColumnInfo>
       <Rows><Row>
         <Col id="SvcId">TCMM100S01</Col>
-        <Col id="gubun">0</Col>
+        <Col id="gubun">3</Col>
         <Col id="login_id">${xmlEscape(loginId)}</Col>
         <Col id="pswd">${xmlEscape(password)}</Col>
+        <Col id="ctz_no" />
+        <Col id="ip_addr" />
+        <Col id="cert_dn" />
+        <Col id="otp_login_cd" />
       </Row></Rows>
     </Dataset>
   `);
 }
 
-function buildAuthContextXml(memberId: string, session: SessionValues) {
-  return xmlRoot(`
-    ${commonParameters("div_Work", memberId, session)}
-    <Dataset id="dsInData">
-      <ColumnInfo>
-        <Column id="SvcId" type="STRING" size="256"/>
-        <Column id="login_id" type="STRING" size="256"/>
-        <Column id="group_yn" type="STRING" size="256"/>
-      </ColumnInfo>
-      <Rows><Row>
-        <Col id="SvcId">TCMM001S02</Col>
-        <Col id="login_id">${xmlEscape(config.easyShop.loginId)}</Col>
-        <Col id="group_yn">N</Col>
-      </Row></Rows>
-    </Dataset>
-  `);
+type ContextField = {
+  id: string;
+  value: string | null;
+  type?: string;
+  size?: string;
+};
+
+function field(id: string, value: string | null, type = "STRING", size = "256"): ContextField {
+  return { id, value, type, size };
 }
 
-function buildSimpleServiceXml(
-  serviceId: string,
+async function callContextService(
+  jar: CookieJar,
   memberId: string,
-  session: SessionValues,
-  values: Record<string, string>,
+  argPgmId: string,
+  serviceId: string,
+  fields: ContextField[],
 ) {
-  const columns = ["SvcId", ...Object.keys(values)]
-    .map((name) => `<Column id="${name}" type="STRING" size="256"/>`).join("");
-  const row = Object.entries({ SvcId: serviceId, ...values })
-    .map(([name, value]) => `<Col id="${name}">${xmlEscape(value)}</Col>`).join("");
-  return xmlRoot(`${commonParameters("div_Work", memberId, session)}
-    <Dataset id="dsInData"><ColumnInfo>${columns}</ColumnInfo><Rows><Row>${row}</Row></Rows></Dataset>`);
+  const session = refreshSessionCookies(jar);
+  return callService(jar, buildContextServiceXml(memberId, argPgmId, serviceId, session, fields));
+}
+
+function buildContextServiceXml(
+  memberId: string,
+  argPgmId: string,
+  serviceId: string,
+  session: SessionValues,
+  fields: ContextField[],
+) {
+  const columns = [field("SvcId", serviceId), ...fields]
+    .map(({ id, type, size }) => `<Column id="${id}" type="${type}" size="${size}"  />`).join("");
+  const rows = [field("SvcId", serviceId), ...fields]
+    .map(({ id, value }) => value === null ? `<Col id="${id}" />` : `<Col id="${id}">${xmlEscape(value)}</Col>`).join("");
+  return xmlRoot(`${commonParameters(argPgmId, memberId, session)}
+    <Dataset id="dsInData"><ColumnInfo>${columns}</ColumnInfo><Rows><Row>${rows}</Row></Rows></Dataset>`);
 }
 
 function buildSalesXml(context: EasyShopContext, session: SessionValues) {
@@ -374,7 +441,8 @@ function xmlHeaders(referer: string): HeadersInit {
   };
 }
 
-const USER_AGENT = "Mozilla/5.0 (compatible; SalesManagementMonitor/1.0)";
+// Match the supported browser client used by EasyShop's Nexacro application.
+const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
 
 const EASYSHOP_SALES_COLUMNS = [
   "SvcId", "user_id", "aut_id", "func_cd", "gubun", "retrv_dt01", "retrv_dt02", "bizr_no", "tid",
