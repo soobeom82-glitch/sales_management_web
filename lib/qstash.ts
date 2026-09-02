@@ -21,7 +21,9 @@ export async function verifyQStashRequest(request: Request): Promise<boolean> {
     return await receiver.verify({
       signature,
       body: await request.text(),
-      url: request.url,
+      // QStash signs by region. The App Router verifier also uses this header
+      // instead of request.url, which can be rewritten by Vercel aliases.
+      upstashRegion: request.headers.get("upstash-region") ?? undefined,
     });
   } catch (error) {
     console.warn(`[batch] invalid QStash signature error=${readableError(error)}`);
