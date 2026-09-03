@@ -1,4 +1,4 @@
-import { recordRun, reserveEventDelivery, updateTelegramDelivery } from "@/lib/db";
+import { recordRun, reserveEventDelivery, storeSalesTransactions, updateTelegramDelivery } from "@/lib/db";
 import { checkEasyShopCancellations } from "@/lib/sources/easyshop";
 import { checkVmmsBulkPurchases } from "@/lib/sources/vmms";
 import { sendTelegramAlert } from "@/lib/telegram";
@@ -13,6 +13,7 @@ export async function runMonitor(): Promise<MonitorRunResult> {
 
   for (const check of checks) {
     const finishedAt = new Date().toISOString();
+    await storeSalesSafely(check);
     await recordRunSafely(check, startedAt, finishedAt);
     for (const event of check.events) {
       const id = await reserveEventDelivery(event);
@@ -37,6 +38,16 @@ export async function runMonitor(): Promise<MonitorRunResult> {
   if (failures.length > 0) throw new Error(failures.join(" | "));
 
   return { startedAt, finishedAt: new Date().toISOString(), sources: checks, insertedEvents, telegramSent };
+}
+
+async function storeSalesSafely(check: SourceCheckResult) {
+  try {
+    await storeSalesTransactions(check.sales);
+  } catch (error) {
+    // Reporting depends on this durable ledger, so a failed write must be retried
+    // by QStash rather than silently producing an incomplete daily report.
+    throw new Error(`${check.source} 판매 원천 데이터를 저장하지 못했습니다: ${readableError(error)}`);
+  }
 }
 
 async function recordRunSafely(check: SourceCheckResult, startedAt: string, finishedAt: string) {

@@ -1,6 +1,6 @@
 import { CookieJar } from "@/lib/cookie-jar";
 import { config } from "@/lib/config";
-import type { MonitorEvent, SourceCheckResult } from "@/lib/types";
+import type { MonitorEvent, SalesTransaction, SourceCheckResult } from "@/lib/types";
 
 type EasyShopContext = {
   memberId: string;
@@ -17,6 +17,7 @@ type EasyShopRecord = {
   card: string;
   issuerName: string;
   approvalNo: string;
+  originalApprovalNo: string;
   amount: number;
   isCanceled: boolean;
 };
@@ -40,10 +41,12 @@ export async function checkEasyShopCancellations(): Promise<SourceCheckResult> {
     const context = await loginAndLoadContext(jar);
     const records = await fetchRecentSales(jar, context);
     const events = records.filter((record) => record.isCanceled).map(toMonitorEvent);
+    const sales = records.map(toSalesTransaction);
     return {
       source: "easyshop",
       checkedAt,
       events,
+      sales,
       metadata: {
         scannedTransactions: records.length,
         matchedTransactions: events.length,
@@ -55,9 +58,25 @@ export async function checkEasyShopCancellations(): Promise<SourceCheckResult> {
       source: "easyshop",
       checkedAt,
       events: [],
+      sales: [],
       error: error instanceof Error ? error.message : "EasyShop 조회 중 알 수 없는 오류",
     };
   }
+}
+
+export async function syncEasyShopSalesForDate(businessDate: string): Promise<SalesTransaction[]> {
+  if (!config.easyShop.loginId || !config.easyShop.loginPassword) {
+    throw new Error("EasyShop 로그인 환경변수가 설정되지 않았습니다.");
+  }
+  const compactDate = normalizeCompactDate(businessDate);
+  const jar = new CookieJar();
+  const context = await loginAndLoadContext(jar);
+  const records = await fetchSalesForWindows(jar, context, [{
+    date: compactDate,
+    fromTime: "00:00:00",
+    toTime: "23:59:59",
+  }]);
+  return records.map(toSalesTransaction);
 }
 
 async function loginAndLoadContext(jar: CookieJar): Promise<EasyShopContext> {
@@ -155,8 +174,16 @@ async function primeSalesAuthorization(jar: CookieJar, memberId: string, autId: 
 }
 
 async function fetchRecentSales(jar: CookieJar, context: EasyShopContext): Promise<EasyShopRecord[]> {
+  return fetchSalesForWindows(jar, context, recentSalesWindows());
+}
+
+async function fetchSalesForWindows(
+  jar: CookieJar,
+  context: EasyShopContext,
+  windows: SalesWindow[],
+): Promise<EasyShopRecord[]> {
   const records: EasyShopRecord[] = [];
-  for (const window of recentSalesWindows()) {
+  for (const window of windows) {
     const session = refreshSessionCookies(jar);
     const responseXml = await callService(jar, buildSalesXml(context, session, window));
     assertNoServiceError(responseXml, "EasyShop 최근 매출 조회");
@@ -205,6 +232,7 @@ function parseSalesRecord(rowXml: string, index: number): EasyShopRecord | null 
     card: fields[6] || "",
     issuerName: fields[8] || "",
     approvalNo: fields[10] || "",
+    originalApprovalNo: hasOriginalApprovalReference(originalApproval) ? originalApproval : "",
     amount: Math.abs(signedAmount),
     isCanceled,
   };
@@ -225,8 +253,35 @@ function toMonitorEvent(record: EasyShopRecord): MonitorEvent {
       terminalNo: record.terminalNo || null,
       status: record.status || "취소",
       approvalNo: record.approvalNo || null,
+      originalApprovalNo: record.originalApprovalNo || null,
       card: record.card || null,
       product: record.issuerName || null,
+    },
+  };
+}
+
+function toSalesTransaction(record: EasyShopRecord): SalesTransaction {
+  const occurredAt = record.occurredAt;
+  const businessDate = occurredAt ? occurredAt.slice(0, 10) : compactDateToDashed(compactKstDate(new Date()));
+  const externalId = record.transactionNo || [record.terminalNo, record.approvalNo, occurredAt ?? "", record.amount].join(":");
+  return {
+    source: "easyshop",
+    externalId,
+    occurredAt,
+    businessDate,
+    amount: record.amount,
+    productName: null,
+    quantity: 1,
+    status: record.status || null,
+    isCanceled: record.isCanceled,
+    details: {
+      transactionNo: record.transactionNo || null,
+      terminalNo: record.terminalNo || null,
+      approvalNo: record.approvalNo || null,
+      originalApprovalNo: record.originalApprovalNo || null,
+      card: record.card || null,
+      issuerName: record.issuerName || null,
+      status: record.status || null,
     },
   };
 }
@@ -440,6 +495,16 @@ function compactKstTime(date: Date) {
   }).formatToParts(date);
   const part = (name: string) => parts.find((item) => item.type === name)?.value ?? "00";
   return `${part("hour")}:${part("minute")}:${part("second")}`;
+}
+
+function normalizeCompactDate(value: string) {
+  const compact = value.replace(/\D/g, "");
+  if (!/^\d{8}$/.test(compact)) throw new Error("EasyShop 조회일은 YYYY-MM-DD 형식이어야 합니다.");
+  return compact;
+}
+
+function compactDateToDashed(value: string) {
+  return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
 }
 
 function compactDateToIso(value: string): string | null {

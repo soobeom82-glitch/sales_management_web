@@ -1,6 +1,6 @@
 import { CookieJar } from "@/lib/cookie-jar";
 import { config } from "@/lib/config";
-import type { MonitorEvent, SourceCheckResult } from "@/lib/types";
+import type { MonitorEvent, SalesTransaction, SourceCheckResult } from "@/lib/types";
 
 type VmmsRow = Record<string, unknown>;
 
@@ -18,14 +18,17 @@ export async function checkVmmsBulkPurchases(): Promise<SourceCheckResult> {
     const reconcile = isVmmsDailyReconciliationTime();
     // The VMMS endpoint has no time-range parameter. Normal polls inspect the
     // newest page only; the final poll of the day reconciles every page.
-    const rows = reconcile ? await fetchAllTodayRows(jar) : await fetchRecentRows(jar);
+    const date = todayCompact();
+    const rows = reconcile ? await fetchAllRowsForDate(jar, date) : await fetchRecentRows(jar, date);
     const events = rows
       .filter(isBulkPurchase)
       .map(toMonitorEvent);
+    const sales = rows.map((row) => toSalesTransaction(row, date));
     return {
       source: "vmms",
       checkedAt,
       events,
+      sales,
       metadata: {
         scannedTransactions: rows.length,
         matchedTransactions: events.length,
@@ -37,9 +40,21 @@ export async function checkVmmsBulkPurchases(): Promise<SourceCheckResult> {
       source: "vmms",
       checkedAt,
       events: [],
+      sales: [],
       error: error instanceof Error ? error.message : "VMMS 조회 중 알 수 없는 오류",
     };
   }
+}
+
+export async function syncVmmsSalesForDate(businessDate: string): Promise<SalesTransaction[]> {
+  if (!config.vmms.loginId || !config.vmms.loginPassword) {
+    throw new Error("VMMS 로그인 환경변수가 설정되지 않았습니다.");
+  }
+  const compactDate = normalizeCompactDate(businessDate);
+  const jar = new CookieJar();
+  await login(jar);
+  return deduplicateSales((await fetchAllRowsForDate(jar, compactDate))
+    .map((row) => toSalesTransaction(row, compactDate)));
 }
 
 async function login(jar: CookieJar) {
@@ -59,26 +74,25 @@ async function login(jar: CookieJar) {
   }
 }
 
-async function fetchAllTodayRows(jar: CookieJar): Promise<VmmsRow[]> {
-  const first = await fetchPage(jar, 1);
+async function fetchAllRowsForDate(jar: CookieJar, date: string): Promise<VmmsRow[]> {
+  const first = await fetchPage(jar, 1, date);
   // VMMS returns `total`, not `totalPages`. Without this calculation only the
   // first 100 transactions were checked, which could hide an earlier item.
   const totalPages = Math.max(1, Math.ceil(toNumber(first.total, first.rows.length) / VMMS_PAGE_SIZE));
   const rows = [...first.rows];
   for (let page = 2; page <= totalPages; page += 1) {
-    const result = await fetchPage(jar, page);
+    const result = await fetchPage(jar, page, date);
     rows.push(...result.rows);
   }
   return rows;
 }
 
-async function fetchRecentRows(jar: CookieJar): Promise<VmmsRow[]> {
-  return (await fetchPage(jar, 1)).rows;
+async function fetchRecentRows(jar: CookieJar, date: string): Promise<VmmsRow[]> {
+  return (await fetchPage(jar, 1, date)).rows;
 }
 
-async function fetchPage(jar: CookieJar, pageNo: number): Promise<{ rows: VmmsRow[]; total: unknown }> {
+async function fetchPage(jar: CookieJar, pageNo: number, date: string): Promise<{ rows: VmmsRow[]; total: unknown }> {
   const base = config.vmms.baseUrl.replace(/\/$/, "");
-  const date = todayCompact();
   const url = new URL(`${base}/sales/RealTime/list.do`);
   const query: Record<string, string> = {
     searchType: "01",
@@ -160,6 +174,48 @@ function toMonitorEvent(row: VmmsRow): MonitorEvent {
   };
 }
 
+function toSalesTransaction(row: VmmsRow, fallbackCompactDate: string): SalesTransaction {
+  const transactionNo = asText(row.transaction_no) || asText(row.terminal_trans_seq);
+  const terminalId = asText(row.terminal_id);
+  const rawTime = asText(row.transaction_date);
+  const amount = Math.abs(toNumber(row.amount, 0));
+  const productName = asText(row.product) || null;
+  const externalId = transactionNo || [terminalId, rawTime, amount, productName ?? ""].join(":");
+  const status = asText(row.pay_step) || null;
+  return {
+    source: "vmms",
+    externalId,
+    occurredAt: vmmsDateToIso(rawTime),
+    businessDate: businessDateFromVmms(rawTime, fallbackCompactDate),
+    amount,
+    productName,
+    quantity: Math.max(1, toNumber(row.item_count, 1)),
+    status,
+    isCanceled: isVmmsCancellation(row),
+    details: {
+      transactionNo: transactionNo || null,
+      terminalId: terminalId || null,
+      machineCode: asText(row.vm_code) || null,
+      columnNo: asText(row.col_no) || null,
+      paymentType: asText(row.pay_type) || null,
+      transactionType: asText(row.input_type) || null,
+      product: productName,
+      status,
+    },
+  };
+}
+
+function isVmmsCancellation(row: VmmsRow) {
+  const status = asText(row.pay_step);
+  const cancellationDate = asText(row.cancel_date);
+  return status === "99" || /취소/.test(status) || hasMeaningfulValue(cancellationDate);
+}
+
+function businessDateFromVmms(raw: string, fallbackCompactDate: string) {
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : compactDateToDashed(fallbackCompactDate);
+}
+
 function todayCompact() {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Seoul",
@@ -169,6 +225,16 @@ function todayCompact() {
   }).formatToParts(new Date());
   const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
   return `${get("year")}${get("month")}${get("day")}`;
+}
+
+function normalizeCompactDate(value: string) {
+  const compact = value.replace(/\D/g, "");
+  if (!/^\d{8}$/.test(compact)) throw new Error("VMMS 조회일은 YYYY-MM-DD 형식이어야 합니다.");
+  return compact;
+}
+
+function compactDateToDashed(value: string) {
+  return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
 }
 
 function isVmmsDailyReconciliationTime() {
@@ -196,6 +262,10 @@ function asText(value: unknown): string {
   return typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
 }
 
+function hasMeaningfulValue(value: string) {
+  return value !== "" && value !== "0" && value.toLowerCase() !== "null" && value !== "-";
+}
+
 function toNumber(value: unknown, fallback: number): number {
   const digits = asText(value).replace(/[^0-9-]/g, "");
   return Number.isFinite(Number(digits)) ? Number(digits) : fallback;
@@ -203,4 +273,14 @@ function toNumber(value: unknown, fallback: number): number {
 
 function isRecord(value: unknown): value is VmmsRow {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function deduplicateSales(transactions: SalesTransaction[]) {
+  const seen = new Set<string>();
+  return transactions.filter((transaction) => {
+    const key = `${transaction.source}:${transaction.externalId}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }

@@ -1,6 +1,6 @@
 # Sales Sentinel
 
-VMMS와 EasyShop의 오늘 거래를 감시하고, 아래 조건을 발견하면 텔레그램으로 한 번만 알리는 Vercel용 웹앱입니다. 실제 작업은 Vercel Function에서 실행하고, Vercel Hobby 플랜의 Cron 제한을 피하기 위해 QStash는 5분마다 작업을 시작하는 scheduler로만 사용합니다.
+VMMS와 EasyShop의 오늘 거래를 감시하고, 아래 조건을 발견하면 텔레그램으로 한 번만 알리는 Vercel용 웹앱입니다. 정상·취소 거래는 판매 원장에도 저장하며, 전일 판매 리포트를 텔레그램으로 발송할 수 있습니다. 실제 작업은 Vercel Function에서 실행하고, Vercel Hobby 플랜의 Cron 제한을 피하기 위해 QStash는 scheduler로만 사용합니다.
 
 | 대상 | 알림 조건 |
 | --- | --- |
@@ -18,6 +18,11 @@ QStash Schedule (every 5 minutes)
   -> Postgres distributed lock
   -> runBatchJob()
   -> VMMS / EasyShop checks and Telegram alerts
+
+QStash Daily Schedule (09:00 KST)
+  -> POST /api/cron/daily-report on Vercel
+  -> refresh the full previous business day from both sources
+  -> upsert sales ledger and generate Telegram daily report
 ```
 
 `runBatchJob()`은 QStash 호출과 관리자 수동 실행이 함께 사용합니다. 잠금을 얻지 못한 실행은 `already_running`으로 성공 응답하며, 조회·DB·텔레그램 전송 실패는 HTTP 500으로 반환해 QStash 재시도가 가능하도록 합니다.
@@ -73,6 +78,30 @@ QStash는 호출마다 `Upstash-Signature`를 추가하며, `/api/cron/batch`는
 
 Schedule을 수정하거나 삭제할 때는 QStash Console의 Schedules 메뉴에서 같은 항목을 편집합니다. 배포 과정에서 Schedule을 자동 생성하지 않으므로 중복 Schedule이 생기지 않습니다.
 
+## 일일 판매 리포트
+
+일일 리포트는 전날의 정상 거래를 기준으로 VMMS와 EasyShop을 **합산하지 않고 출처별로** 표시합니다. 두 출처에 같은 결제 데이터가 포함될 수 있어 단순 합산은 중복 집계 위험이 있기 때문입니다.
+
+- 매출, 거래 건수, 객단가
+- 전일 및 지난주 같은 요일 대비 매출 증감
+- 취소 건수와 취소 금액
+- VMMS 상품별 판매금액 TOP 3 및 지난주 같은 요일 대비 판매수량 증감
+- 시간대별 피크 매출
+- 5분 감시 실행의 오류 여부
+
+EasyShop 응답에는 상품명이 포함되지 않으므로, 상품별 분석은 VMMS에만 표시됩니다. 첫 7일 동안은 지난주 같은 요일 데이터가 부족해 상품 증감 대신 `비교 데이터 수집 중`으로 표시될 수 있습니다.
+
+QStash Console에 아래 Schedule을 추가하면 매일 오전 9시(KST)에 전날 리포트를 보냅니다.
+
+| 항목 | 값 |
+| --- | --- |
+| Destination | `https://<production-domain>/api/cron/daily-report` |
+| Method | `POST` |
+| Schedule | `0 9 * * *` |
+| Timezone | `Asia/Seoul` |
+
+리포트 기준일마다 Postgres에 발송 상태를 저장하므로, QStash 재시도나 중복 호출에도 이미 성공한 리포트는 다시 보내지 않습니다.
+
 ## 확인 및 수동 실행
 
 배포 후 아래 주소로 설정 누락 여부를 확인합니다.
@@ -85,6 +114,13 @@ GET /api/health
 
 ```bash
 curl -X POST https://<your-domain>/api/monitor/run \
+  -H "Authorization: Bearer <MONITOR_ADMIN_TOKEN>"
+```
+
+전일 리포트는 다음과 같이 수동 실행할 수 있습니다. 특정 기준일을 시험할 때는 `date`를 추가합니다.
+
+```bash
+curl -X POST "https://<your-domain>/api/reports/daily/run?date=2026-09-02" \
   -H "Authorization: Bearer <MONITOR_ADMIN_TOKEN>"
 ```
 

@@ -11,6 +11,11 @@ export async function GET() {
       { source: "vmms", rule: "타입 99 또는 일괄 구매 거래" },
       { source: "easyshop", rule: "취소 거래" },
     ],
-    scheduler: { provider: "QStash", endpoint: "/api/cron/batch" },
+    scheduler: {
+      provider: "QStash",
+      monitoringEndpoint: "/api/cron/batch",
+      dailyReportEndpoint: "/api/cron/daily-report",
+      dailyReportSchedule: "0 9 * * * Asia/Seoul",
+    },
   });
 }
