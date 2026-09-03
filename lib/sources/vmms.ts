@@ -1,5 +1,6 @@
 import { CookieJar } from "@/lib/cookie-jar";
 import { config } from "@/lib/config";
+import { vmmsProductMappings } from "@/lib/db";
 import type { MonitorEvent, SalesTransaction, SourceCheckResult } from "@/lib/types";
 
 type VmmsRow = Record<string, unknown>;
@@ -20,10 +21,11 @@ export async function checkVmmsBulkPurchases(): Promise<SourceCheckResult> {
     // newest page only; the final poll of the day reconciles every page.
     const date = todayCompact();
     const rows = reconcile ? await fetchAllRowsForDate(jar, date) : await fetchRecentRows(jar, date);
+    const productMappings = await vmmsProductMappings();
     const events = rows
       .filter(isBulkPurchase)
       .map(toMonitorEvent);
-    const sales = rows.map((row) => toSalesTransaction(row, date));
+    const sales = rows.map((row) => toSalesTransaction(row, date, productMappings));
     return {
       source: "vmms",
       checkedAt,
@@ -53,8 +55,9 @@ export async function syncVmmsSalesForDate(businessDate: string): Promise<SalesT
   const compactDate = normalizeCompactDate(businessDate);
   const jar = new CookieJar();
   await login(jar);
+  const productMappings = await vmmsProductMappings();
   return deduplicateSales((await fetchAllRowsForDate(jar, compactDate))
-    .map((row) => toSalesTransaction(row, compactDate)));
+    .map((row) => toSalesTransaction(row, compactDate, productMappings)));
 }
 
 async function login(jar: CookieJar) {
@@ -174,12 +177,18 @@ function toMonitorEvent(row: VmmsRow): MonitorEvent {
   };
 }
 
-function toSalesTransaction(row: VmmsRow, fallbackCompactDate: string): SalesTransaction {
+function toSalesTransaction(
+  row: VmmsRow,
+  fallbackCompactDate: string,
+  productMappings: Map<string, string>,
+): SalesTransaction {
   const transactionNo = asText(row.transaction_no) || asText(row.terminal_trans_seq);
   const terminalId = asText(row.terminal_id);
   const rawTime = asText(row.transaction_date);
   const amount = Math.abs(toNumber(row.amount, 0));
-  const productName = asText(row.product) || null;
+  const columnNo = asText(row.col_no);
+  const rawProduct = asText(row.product) || null;
+  const productName = productMappings.get(columnNo)?.trim() || rawProduct;
   const externalId = transactionNo || [terminalId, rawTime, amount, productName ?? ""].join(":");
   const status = asText(row.pay_step) || null;
   return {
@@ -196,9 +205,10 @@ function toSalesTransaction(row: VmmsRow, fallbackCompactDate: string): SalesTra
       transactionNo: transactionNo || null,
       terminalId: terminalId || null,
       machineCode: asText(row.vm_code) || null,
-      columnNo: asText(row.col_no) || null,
+      columnNo: columnNo || null,
       paymentType: asText(row.pay_type) || null,
       transactionType: asText(row.input_type) || null,
+      rawProduct,
       product: productName,
       status,
     },

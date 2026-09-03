@@ -1,5 +1,6 @@
 import { neon } from "@neondatabase/serverless";
 import { config } from "@/lib/config";
+import { VMMS_PRODUCT_MAPPING_SEED } from "@/lib/vmms-product-mapping";
 import type {
   DailyReportRow,
   DailySalesMetric,
@@ -74,6 +75,12 @@ export async function ensureSchema() {
         sent_at TIMESTAMPTZ,
         error TEXT
       )`;
+      await sql`CREATE TABLE IF NOT EXISTS vmms_product_mappings (
+        col_no TEXT PRIMARY KEY,
+        raw_product TEXT NOT NULL,
+        actual_product TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
       await sql`CREATE TABLE IF NOT EXISTS monitor_job_locks (
         job_name TEXT PRIMARY KEY,
         locked_until TIMESTAMPTZ NOT NULL,
@@ -85,9 +92,41 @@ export async function ensureSchema() {
       await sql`CREATE INDEX IF NOT EXISTS monitor_runs_started_at_idx ON monitor_runs (started_at DESC)`;
       await sql`CREATE INDEX IF NOT EXISTS sales_transactions_date_source_idx ON sales_transactions (business_date DESC, source)`;
       await sql`CREATE INDEX IF NOT EXISTS sales_transactions_date_product_idx ON sales_transactions (business_date DESC, product_name) WHERE NOT is_canceled`;
+
+      // Keep VMMS reports tied to the physical machine slot rather than the
+      // mutable label returned by the VMMS `product` field.
+      const mappingSeedStatements = VMMS_PRODUCT_MAPPING_SEED.map((mapping) => sql`
+          INSERT INTO vmms_product_mappings (col_no, raw_product, actual_product)
+          VALUES (${mapping.colNo}, ${mapping.rawProduct}, ${mapping.actualProduct})
+          ON CONFLICT (col_no) DO UPDATE
+          SET raw_product = EXCLUDED.raw_product,
+              actual_product = EXCLUDED.actual_product,
+              updated_at = NOW()
+      `);
+      await sql.transaction([
+        ...mappingSeedStatements,
+        sql`
+          UPDATE sales_transactions AS sales
+          SET product_name = mappings.actual_product
+          FROM vmms_product_mappings AS mappings
+          WHERE sales.source = 'vmms'
+            AND sales.details ->> 'columnNo' = mappings.col_no
+            AND sales.product_name IS DISTINCT FROM mappings.actual_product
+        `,
+      ]);
     })();
   }
   return schemaReady;
+}
+
+export async function vmmsProductMappings(): Promise<Map<string, string>> {
+  await ensureSchema();
+  const sql = sqlClient();
+  const rows = await sql`
+    SELECT col_no AS "colNo", actual_product AS "actualProduct"
+    FROM vmms_product_mappings
+  ` as unknown as Array<{ colNo: string; actualProduct: string }>;
+  return new Map(rows.map((row) => [row.colNo, row.actualProduct]));
 }
 
 export async function reserveEventDelivery(event: MonitorEvent): Promise<number | null> {
