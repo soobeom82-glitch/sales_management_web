@@ -222,16 +222,7 @@ export async function storeSalesTransactions(transactions: SalesTransaction[]) {
         details = EXCLUDED.details,
         last_seen_at = NOW()
     `);
-    const cancellationLinkQueries = batch
-      .filter((transaction) => transaction.source === "easyshop" && transaction.isCanceled && hasText(transaction.details.originalApprovalNo))
-      .map((transaction) => sql`
-        UPDATE sales_transactions
-        SET is_canceled = TRUE, last_seen_at = NOW()
-        WHERE source = 'easyshop'
-          AND external_id <> ${transaction.externalId}
-          AND details ->> 'approvalNo' = ${String(transaction.details.originalApprovalNo)}
-      `);
-    await sql.transaction([...insertQueries, ...cancellationLinkQueries]);
+    await sql.transaction(insertQueries);
   }
 }
 
@@ -421,8 +412,4 @@ function chunk<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));
   return chunks;
-}
-
-function hasText(value: string | number | boolean | null | undefined) {
-  return value !== null && value !== undefined && String(value).trim() !== "";
 }

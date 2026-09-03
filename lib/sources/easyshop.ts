@@ -12,12 +12,22 @@ type EasyShopContext = {
 type EasyShopRecord = {
   transactionNo: string;
   terminalNo: string;
+  tid: string;
   status: string;
   occurredAt: string | null;
   card: string;
+  cardType: string;
   issuerName: string;
+  acquirerName: string;
+  merchantNumber: string;
   approvalNo: string;
-  originalApprovalNo: string;
+  originalApprovalDate: string;
+  installment: string;
+  transactionMethod: string;
+  responseStatus: string;
+  signatureYn: string;
+  canceledAt: string;
+  simplePaymentCategory: string;
   amount: number;
   isCanceled: boolean;
 };
@@ -214,7 +224,7 @@ function parseSalesRecord(rowXml: string, index: number): EasyShopRecord | null 
   const status = fields[3] ?? "";
   const rawDate = fields[4] ?? "";
   const rawAmount = fields[11] ?? "0";
-  const originalApproval = fields[15] ?? "";
+  const originalApprovalDate = fields[15] ?? "";
   const easyShopCancel = fields[24] ?? "";
   const ifmType = fields[3] ?? "";
   const signedAmount = signedNumber(rawAmount);
@@ -222,17 +232,29 @@ function parseSalesRecord(rowXml: string, index: number): EasyShopRecord | null 
     (cancelCode !== "" && !["0", "7"].includes(cancelCode)) ||
     signedAmount < 0 ||
     easyShopCancel.toUpperCase() === "Y" ||
-    hasOriginalApprovalReference(originalApproval);
+    hasOriginalApprovalReference(originalApprovalDate);
 
   return {
     transactionNo: fields[0] || `row-${index}`,
     terminalNo: fields[2] || "",
+    tid: fields[5] || "",
     status: status || (ifmType === "0200" ? "취소" : ifmType),
     occurredAt: compactDateToIso(rawDate),
     card: fields[6] || "",
+    cardType: fields[7] || "",
     issuerName: fields[8] || "",
-    approvalNo: fields[10] || "",
-    originalApprovalNo: hasOriginalApprovalReference(originalApproval) ? originalApproval : "",
+    acquirerName: fields[9] || "",
+    merchantNumber: fields[10] || "",
+    // `data_set` field 10 is jo_shop_no (merchant number). The approval
+    // number returned by TESS103S01 is field 13.
+    approvalNo: fields[13] || "",
+    originalApprovalDate: hasOriginalApprovalReference(originalApprovalDate) ? originalApprovalDate : "",
+    installment: fields[12] || "",
+    transactionMethod: fields[14] || "",
+    responseStatus: fields[17] || "",
+    signatureYn: fields[18] || "",
+    canceledAt: fields[25] || "",
+    simplePaymentCategory: fields[26] || "",
     amount: Math.abs(signedAmount),
     isCanceled,
   };
@@ -251,11 +273,17 @@ function toMonitorEvent(record: EasyShopRecord): MonitorEvent {
     details: {
       transactionNo: record.transactionNo || null,
       terminalNo: record.terminalNo || null,
+      tid: record.tid || null,
       status: record.status || "취소",
       approvalNo: record.approvalNo || null,
-      originalApprovalNo: record.originalApprovalNo || null,
+      originalApprovalDate: record.originalApprovalDate || null,
       card: record.card || null,
-      product: record.issuerName || null,
+      cardType: record.cardType || null,
+      issuerName: record.issuerName || null,
+      acquirerName: record.acquirerName || null,
+      merchantNumber: record.merchantNumber || null,
+      installment: record.installment || null,
+      simplePaymentCategory: record.simplePaymentCategory || null,
     },
   };
 }
@@ -277,10 +305,20 @@ function toSalesTransaction(record: EasyShopRecord): SalesTransaction {
     details: {
       transactionNo: record.transactionNo || null,
       terminalNo: record.terminalNo || null,
+      tid: record.tid || null,
       approvalNo: record.approvalNo || null,
-      originalApprovalNo: record.originalApprovalNo || null,
+      originalApprovalDate: record.originalApprovalDate || null,
       card: record.card || null,
+      cardType: record.cardType || null,
       issuerName: record.issuerName || null,
+      acquirerName: record.acquirerName || null,
+      merchantNumber: record.merchantNumber || null,
+      installment: record.installment || null,
+      transactionMethod: record.transactionMethod || null,
+      responseStatus: record.responseStatus || null,
+      signatureYn: record.signatureYn || null,
+      canceledAt: record.canceledAt || null,
+      simplePaymentCategory: record.simplePaymentCategory || null,
       status: record.status || null,
     },
   };
