@@ -39,6 +39,8 @@ type SalesWindow = {
 };
 
 const EASYSHOP_LOOKBACK_MINUTES = 15;
+const EASYSHOP_RELOGIN_ATTEMPTS = 2;
+const EASYSHOP_RELOGIN_RETRY_DELAY_MS = 1_000;
 
 export async function checkEasyShopCancellations(): Promise<SourceCheckResult> {
   const checkedAt = new Date().toISOString();
@@ -47,9 +49,7 @@ export async function checkEasyShopCancellations(): Promise<SourceCheckResult> {
       throw new Error("EasyShop 로그인 환경변수가 설정되지 않았습니다.");
     }
 
-    const jar = new CookieJar();
-    const context = await loginAndLoadContext(jar);
-    const records = await fetchRecentSales(jar, context);
+    const records = await fetchEasyShopRecords(recentSalesWindows());
     const events = records.filter((record) => record.isCanceled).map(toMonitorEvent);
     const sales = records.map(toSalesTransaction);
     return {
@@ -79,14 +79,41 @@ export async function syncEasyShopSalesForDate(businessDate: string): Promise<Sa
     throw new Error("EasyShop 로그인 환경변수가 설정되지 않았습니다.");
   }
   const compactDate = normalizeCompactDate(businessDate);
-  const jar = new CookieJar();
-  const context = await loginAndLoadContext(jar);
-  const records = await fetchSalesForWindows(jar, context, [{
+  const records = await fetchEasyShopRecords([{
     date: compactDate,
     fromTime: "00:00:00",
     toTime: "23:59:59",
   }]);
   return records.map(toSalesTransaction);
+}
+
+/**
+ * EasyShop terminates a session when it detects the same account from another
+ * IP address. Start the whole Nexacro handshake over with a fresh cookie jar
+ * once, then leave any repeated failure to QStash's durable retry policy.
+ */
+async function fetchEasyShopRecords(windows: SalesWindow[]): Promise<EasyShopRecord[]> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= EASYSHOP_RELOGIN_ATTEMPTS; attempt += 1) {
+    try {
+      const jar = new CookieJar();
+      const context = await loginAndLoadContext(jar);
+      return await fetchSalesForWindows(jar, context, windows);
+    } catch (error) {
+      lastError = error;
+      if (!isConcurrentLoginError(error) || attempt === EASYSHOP_RELOGIN_ATTEMPTS) {
+        throw error;
+      }
+
+      console.warn(
+        `[easyshop] concurrent session detected; retrying with a fresh login attempt=${attempt + 1}`,
+      );
+      await delay(EASYSHOP_RELOGIN_RETRY_DELAY_MS);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("EasyShop 재로그인에 실패했습니다.");
 }
 
 async function loginAndLoadContext(jar: CookieJar): Promise<EasyShopContext> {
@@ -181,10 +208,6 @@ async function primeSalesAuthorization(jar: CookieJar, memberId: string, autId: 
     const xml = await callContextService(jar, memberId, "div_Work", serviceId, fields);
     assertNoServiceError(xml, `EasyShop 매출 권한 초기화(${serviceId})`);
   }
-}
-
-async function fetchRecentSales(jar: CookieJar, context: EasyShopContext): Promise<EasyShopRecord[]> {
-  return fetchSalesForWindows(jar, context, recentSalesWindows());
 }
 
 async function fetchSalesForWindows(
@@ -489,6 +512,15 @@ function assertNoServiceError(xml: string, label: string) {
   if (errorCode && errorCode !== "0") {
     throw new Error(`${label} 오류(ErrorCode=${errorCode}${getParameter(xml, "ErrorMsg") ? `, ${getParameter(xml, "ErrorMsg")}` : ""})`);
   }
+}
+
+function isConcurrentLoginError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /ErrorCode\s*=\s*-9\b/.test(message) || message.includes("다른 IP로 로그인");
+}
+
+function delay(milliseconds: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function getParameter(xml: string, id: string) {
