@@ -32,7 +32,14 @@ export type DailyReportJobResult = {
   report?: DailySalesReport;
 };
 
-export async function runDailyReportJob(requestedDate?: string): Promise<DailyReportJobResult> {
+type DailyReportRunOptions = {
+  force?: boolean;
+};
+
+export async function runDailyReportJob(
+  requestedDate?: string,
+  { force = false }: DailyReportRunOptions = {},
+): Promise<DailyReportJobResult> {
   const reportDate = normalizeReportDate(requestedDate ?? previousKstDate());
   const jobName = `daily-sales-report:${reportDate}`;
   let lockAcquired = false;
@@ -45,7 +52,7 @@ export async function runDailyReportJob(requestedDate?: string): Promise<DailyRe
       return { reportDate, skipped: true, reason: "already_running", processedCount: 0 };
     }
 
-    reportReserved = await reserveDailyReport(reportDate);
+    reportReserved = await reserveDailyReport(reportDate, force);
     if (!reportReserved) {
       return { reportDate, skipped: true, reason: "already_sent", processedCount: 0 };
     }

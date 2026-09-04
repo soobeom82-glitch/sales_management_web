@@ -355,7 +355,7 @@ export async function sourceHealthForDate(date: string): Promise<SourceReportHea
   return rows;
 }
 
-export async function reserveDailyReport(reportDate: string): Promise<boolean> {
+export async function reserveDailyReport(reportDate: string, force = false): Promise<boolean> {
   await ensureSchema();
   const sql = sqlClient();
   const rows = await sql`
@@ -363,7 +363,8 @@ export async function reserveDailyReport(reportDate: string): Promise<boolean> {
     VALUES (${reportDate}::DATE, 'processing', NOW(), NULL)
     ON CONFLICT (report_date) DO UPDATE
     SET status = 'processing', generated_at = NOW(), error = NULL
-    WHERE daily_reports.status = 'failed'
+    WHERE ${force}
+       OR daily_reports.status = 'failed'
        OR (daily_reports.status IN ('processing', 'pending')
            AND daily_reports.generated_at < NOW() - INTERVAL '15 minutes')
     RETURNING report_date

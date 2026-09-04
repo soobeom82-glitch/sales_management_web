@@ -22,9 +22,12 @@ export async function POST(request: Request) {
 }
 
 async function executeDailyReport(request: Request) {
-  const reportDate = new URL(request.url).searchParams.get("date") ?? undefined;
+  const url = new URL(request.url);
+  const reportDate = url.searchParams.get("date") ?? undefined;
+  // Only authenticated administrative or Cron calls can request a replay.
+  const force = url.searchParams.get("force") === "1";
   try {
-    const result = await runDailyReportJob(reportDate);
+    const result = await runDailyReportJob(reportDate, { force });
     return Response.json({ ok: true, result });
   } catch (error) {
     return Response.json(
