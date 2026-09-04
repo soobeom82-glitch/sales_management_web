@@ -34,8 +34,8 @@ type EasyShopRecord = {
 
 type SalesWindow = {
   date: string;
-  fromTime: string;
-  toTime: string;
+  fromTime?: string;
+  toTime?: string;
 };
 
 const EASYSHOP_LOOKBACK_MINUTES = 15;
@@ -79,11 +79,9 @@ export async function syncEasyShopSalesForDate(businessDate: string): Promise<Sa
     throw new Error("EasyShop 로그인 환경변수가 설정되지 않았습니다.");
   }
   const compactDate = normalizeCompactDate(businessDate);
-  const records = await fetchEasyShopRecords([{
-    date: compactDate,
-    fromTime: "00:00:00",
-    toTime: "23:59:59",
-  }]);
+  // The Nexacro client omits the time fields for a whole-day query. Sending
+  // 00:00:00/23:59:59 is not equivalent and can produce an empty result.
+  const records = await fetchEasyShopRecords([{ date: compactDate }]);
   return records.map(toSalesTransaction);
 }
 
@@ -446,8 +444,6 @@ function buildSalesXml(context: EasyShopContext, session: SessionValues, window:
     gubun: "0",
     retrv_dt01: window.date,
     retrv_dt02: window.date,
-    trx_tm: window.fromTime,
-    trx_tm2: window.toTime,
     bizr_no: context.bizrNo,
     tid: context.tid,
     trx_resp_cd: "0000",
@@ -461,6 +457,12 @@ function buildSalesXml(context: EasyShopContext, session: SessionValues, window:
     rowCnt: "0",
     rowCnt02: "0",
   };
+  // Keep the all-day request byte-for-byte compatible with the browser's
+  // dataset: it leaves these columns out rather than sending a time range.
+  if (window.fromTime && window.toTime) {
+    valueRows.trx_tm = window.fromTime;
+    valueRows.trx_tm2 = window.toTime;
+  }
   const columns = EASYSHOP_SALES_COLUMNS
     .map(({ id, type, size }) => `<Column id="${id}" type="${type}" size="${size}"  />`).join("");
   const row = Object.entries(valueRows)
