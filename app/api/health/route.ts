@@ -12,10 +12,16 @@ export async function GET() {
       { source: "easyshop", rule: "취소 거래" },
     ],
     scheduler: {
-      provider: "QStash",
-      monitoringEndpoint: "/api/cron/batch",
-      dailyReportEndpoint: "/api/cron/daily-report",
-      dailyReportSchedule: "0 9 * * * Asia/Seoul",
+      monitoring: {
+        provider: "QStash",
+        endpoint: "/api/cron/batch",
+        schedule: "*/5 * * * *",
+      },
+      dailyReport: {
+        provider: "Vercel Cron",
+        endpoint: "/api/cron/daily-report",
+        schedule: "0 0 * * * UTC (09:00 KST target)",
+      },
     },
   });
 }

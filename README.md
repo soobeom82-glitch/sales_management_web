@@ -1,6 +1,6 @@
 # Sales Sentinel
 
-VMMS와 EasyShop의 오늘 거래를 감시하고, 아래 조건을 발견하면 텔레그램으로 한 번만 알리는 Vercel용 웹앱입니다. 정상·취소 거래는 판매 원장에도 저장하며, 전일 판매 리포트를 텔레그램으로 발송할 수 있습니다. 실제 작업은 Vercel Function에서 실행하고, Vercel Hobby 플랜의 Cron 제한을 피하기 위해 QStash는 scheduler로만 사용합니다.
+VMMS와 EasyShop의 오늘 거래를 감시하고, 아래 조건을 발견하면 텔레그램으로 한 번만 알리는 Vercel용 웹앱입니다. 정상·취소 거래는 판매 원장에도 저장하며, 전일 판매 리포트를 텔레그램으로 발송할 수 있습니다. 5분 감시는 QStash, 일일 리포트는 Vercel Cron이 실행합니다.
 
 | 대상 | 알림 조건 |
 | --- | --- |
@@ -19,8 +19,9 @@ QStash Schedule (every 5 minutes)
   -> runBatchJob()
   -> VMMS / EasyShop checks and Telegram alerts
 
-QStash Daily Schedule (09:00 KST)
-  -> POST /api/cron/daily-report on Vercel
+Vercel Cron (00:00 UTC, 09:00 KST target)
+  -> GET /api/cron/daily-report on Vercel
+  -> CRON_SECRET authorization verification
   -> refresh the full previous business day from both sources
   -> upsert sales ledger and generate Telegram daily report
 ```
@@ -32,7 +33,7 @@ QStash Daily Schedule (09:00 KST)
 1. Vercel에서 이 GitHub 저장소를 Import합니다.
 2. Storage 탭에서 Neon Postgres를 연결하거나, 별도 Postgres의 `DATABASE_URL`을 추가합니다.
 3. `.env.example`에 적힌 환경변수를 Production 환경에 등록합니다.
-4. QStash Console에서 production URL을 대상으로 Schedule을 한 번 생성합니다.
+4. QStash Console에서 5분 감시용 production URL Schedule을 한 번 생성합니다.
 5. `main` 브랜치에 푸시하면 자동 배포됩니다.
 
 비밀값은 GitHub, 소스 코드, 브라우저에 저장하지 않습니다. VMMS/EasyShop 계정과 텔레그램 토큰은 Vercel 환경변수에만 등록하세요.
@@ -42,6 +43,7 @@ QStash Daily Schedule (09:00 KST)
 ```text
 DATABASE_URL
 MONITOR_ADMIN_TOKEN
+CRON_SECRET
 QSTASH_CURRENT_SIGNING_KEY
 QSTASH_NEXT_SIGNING_KEY
 TELEGRAM_BOT_TOKEN
@@ -52,7 +54,7 @@ EASYSHOP_LOGIN_ID
 EASYSHOP_LOGIN_PASSWORD
 ```
 
-`MONITOR_ADMIN_TOKEN`은 긴 난수로 생성합니다. QStash signing key 두 개는 QStash Console의 Keys 화면에서 가져옵니다. 일정은 Console에서 한 번만 등록하므로 `QSTASH_TOKEN`은 Vercel 런타임 환경변수에 넣을 필요가 없습니다.
+`MONITOR_ADMIN_TOKEN`과 `CRON_SECRET`은 각각 16자 이상 임의 난수로 생성합니다. QStash signing key 두 개는 QStash Console의 Keys 화면에서 가져옵니다. 일정은 Console에서 한 번만 등록하므로 `QSTASH_TOKEN`은 Vercel 런타임 환경변수에 넣을 필요가 없습니다.
 
 EasyShop 로그인 응답 환경에 따라 아래 값을 보조값으로 넣을 수 있습니다. 기본적으로는 로그인 흐름에서 `mbr_id`와 권한 정보를 읽어오며, 조회 서버가 값을 요구할 때만 사용합니다.
 
@@ -91,16 +93,9 @@ Schedule을 수정하거나 삭제할 때는 QStash Console의 Schedules 메뉴�
 
 VMMS는 응답의 `product` 대신 `col_no` 기반 실제 상품 매핑을 적용해 상품 분석합니다. 원본 `product` 값은 거래 원장 `details.rawProduct`에 보존합니다. EasyShop 응답에는 상품명이 포함되지 않으므로, 상품별 분석은 VMMS에만 표시됩니다. 첫 7일 동안은 지난주 같은 요일 데이터가 부족해 상품 증감 대신 `비교 데이터 수집 중`으로 표시될 수 있습니다.
 
-QStash Console에 아래 Schedule을 추가하면 매일 오전 9시(KST)에 전날 리포트를 보냅니다.
+`vercel.json`의 Vercel Cron이 매일 `00:00 UTC`(한국 시간 09:00)을 목표로 전날 리포트를 실행합니다. Hobby 플랜은 실제 실행 시점이 해당 시간대 안에서 지연될 수 있습니다. Vercel 프로젝트 Production 환경에 `CRON_SECRET`을 등록해야 인증된 실행이 가능합니다.
 
-| 항목 | 값 |
-| --- | --- |
-| Destination | `https://<production-domain>/api/cron/daily-report` |
-| Method | `POST` |
-| Schedule | `0 9 * * *` |
-| Timezone | `Asia/Seoul` |
-
-리포트 기준일마다 Postgres에 발송 상태를 저장하므로, QStash 재시도나 중복 호출에도 이미 성공한 리포트는 다시 보내지 않습니다.
+리포트 기준일마다 Postgres에 발송 상태를 저장하므로, Vercel Cron 재시도나 중복 호출에도 이미 성공한 리포트는 다시 보내지 않습니다.
 
 ## 확인 및 수동 실행
 

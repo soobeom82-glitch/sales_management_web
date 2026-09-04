@@ -3,6 +3,7 @@ const nonBlank = (value: string | undefined) => value?.trim() || "";
 export const config = {
   databaseUrl: nonBlank(process.env.DATABASE_URL),
   monitorAdminToken: nonBlank(process.env.MONITOR_ADMIN_TOKEN),
+  cronSecret: nonBlank(process.env.CRON_SECRET),
   qstashCurrentSigningKey: nonBlank(process.env.QSTASH_CURRENT_SIGNING_KEY),
   qstashNextSigningKey: nonBlank(process.env.QSTASH_NEXT_SIGNING_KEY),
   telegramBotToken: nonBlank(process.env.TELEGRAM_BOT_TOKEN),
@@ -32,6 +33,7 @@ export function missingMonitorConfiguration(): string[] {
     ["DATABASE_URL", config.databaseUrl],
     ["QSTASH_CURRENT_SIGNING_KEY", config.qstashCurrentSigningKey],
     ["QSTASH_NEXT_SIGNING_KEY", config.qstashNextSigningKey],
+    ["CRON_SECRET", config.cronSecret],
     ["TELEGRAM_BOT_TOKEN", config.telegramBotToken],
     ["TELEGRAM_CHAT_ID", config.telegramChatId],
     ["VMMS_LOGIN_ID", config.vmms.loginId],
