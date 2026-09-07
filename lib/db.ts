@@ -409,21 +409,6 @@ export async function latestDailyReport(): Promise<DailyReportRow | null> {
   return rows[0] ?? null;
 }
 
-export async function dailyReportForDate(reportDate: string): Promise<DailyReportRow | null> {
-  if (!config.databaseUrl) return null;
-  await ensureSchema();
-  const sql = sqlClient();
-  const rows = await sql`
-    SELECT
-      report_date::text AS "reportDate", status, payload,
-      generated_at AS "generatedAt", sent_at AS "sentAt", error
-    FROM daily_reports
-    WHERE report_date = ${reportDate}::DATE
-    LIMIT 1
-  ` as unknown as DailyReportRow[];
-  return rows[0] ?? null;
-}
-
 function chunk<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));

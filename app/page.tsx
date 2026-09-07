@@ -7,7 +7,7 @@ export default async function HomePage() {
   const missing = missingMonitorConfiguration();
   const [events, runs] = await Promise.all([recentEvents(), recentRuns()]);
   const configuredSources = [
-    { label: "VMMS", rule: `타입 ${config.vmms.bulkValue} / 일괄 구매 거래`, configured: Boolean(config.vmms.loginId && config.vmms.loginPassword) },
+    { label: "VMMS", rule: `타입 ${config.vmms.bulkValue} 또는 상품 매핑 기준 일괄 구매 거래`, configured: Boolean(config.vmms.loginId && config.vmms.loginPassword) },
     { label: "EasyShop", rule: "취소 거래", configured: Boolean(config.easyShop.loginId && config.easyShop.loginPassword) },
   ];
 
@@ -133,4 +133,3 @@ function formatDetails(details: Record<string, string | number | boolean | null>
 function deliveryLabel(status: "sent" | "failed" | "pending") {
   return status === "sent" ? "텔레그램 발송" : status === "failed" ? "발송 실패" : "발송 대기";
 }
-
