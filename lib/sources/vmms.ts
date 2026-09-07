@@ -22,21 +22,7 @@ export async function checkVmmsBulkPurchases(): Promise<SourceCheckResult> {
     const date = todayCompact();
     const rows = reconcile ? await fetchAllRowsForDate(jar, date) : await fetchRecentRows(jar, date);
     const productMappings = await vmmsProductMappings();
-    const events = rows
-      .filter(isBulkPurchase)
-      .map(toMonitorEvent);
-    const sales = rows.map((row) => toSalesTransaction(row, date, productMappings));
-    return {
-      source: "vmms",
-      checkedAt,
-      events,
-      sales,
-      metadata: {
-        scannedTransactions: rows.length,
-        matchedTransactions: events.length,
-        reconciliation: reconcile,
-      },
-    };
+    return makeVmmsCheck(checkedAt, rows, date, productMappings, reconcile);
   } catch (error) {
     return {
       source: "vmms",
@@ -48,16 +34,59 @@ export async function checkVmmsBulkPurchases(): Promise<SourceCheckResult> {
   }
 }
 
-export async function syncVmmsSalesForDate(businessDate: string): Promise<SalesTransaction[]> {
-  if (!config.vmms.loginId || !config.vmms.loginPassword) {
-    throw new Error("VMMS 로그인 환경변수가 설정되지 않았습니다.");
+// A full-day scan is used by the daily report and manual recovery flow so an
+// alert cannot be lost when a normal five-minute poll only sees newer rows.
+export async function reconcileVmmsBulkPurchasesForDate(businessDate: string): Promise<SourceCheckResult> {
+  const checkedAt = new Date().toISOString();
+  try {
+    if (!config.vmms.loginId || !config.vmms.loginPassword) {
+      throw new Error("VMMS 로그인 환경변수가 설정되지 않았습니다.");
+    }
+
+    const compactDate = normalizeCompactDate(businessDate);
+    const jar = new CookieJar();
+    await login(jar);
+    const [rows, productMappings] = await Promise.all([
+      fetchAllRowsForDate(jar, compactDate),
+      vmmsProductMappings(),
+    ]);
+    return makeVmmsCheck(checkedAt, rows, compactDate, productMappings, true);
+  } catch (error) {
+    return {
+      source: "vmms",
+      checkedAt,
+      events: [],
+      sales: [],
+      error: error instanceof Error ? error.message : "VMMS 재검증 중 알 수 없는 오류",
+    };
   }
-  const compactDate = normalizeCompactDate(businessDate);
-  const jar = new CookieJar();
-  await login(jar);
-  const productMappings = await vmmsProductMappings();
-  return deduplicateSales((await fetchAllRowsForDate(jar, compactDate))
-    .map((row) => toSalesTransaction(row, compactDate, productMappings)));
+}
+
+export async function syncVmmsSalesForDate(businessDate: string): Promise<SalesTransaction[]> {
+  const check = await reconcileVmmsBulkPurchasesForDate(businessDate);
+  if (check.error) throw new Error(check.error);
+  return deduplicateSales(check.sales);
+}
+
+function makeVmmsCheck(
+  checkedAt: string,
+  rows: VmmsRow[],
+  date: string,
+  productMappings: Map<string, string>,
+  reconciliation: boolean,
+): SourceCheckResult {
+  const events = rows.filter(isBulkPurchase).map(toMonitorEvent);
+  return {
+    source: "vmms",
+    checkedAt,
+    events,
+    sales: rows.map((row) => toSalesTransaction(row, date, productMappings)),
+    metadata: {
+      scannedTransactions: rows.length,
+      matchedTransactions: events.length,
+      reconciliation,
+    },
+  };
 }
 
 async function login(jar: CookieJar) {

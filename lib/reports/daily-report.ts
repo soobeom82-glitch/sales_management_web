@@ -11,7 +11,7 @@ import {
   updateDailyReportDelivery,
 } from "@/lib/db";
 import { syncEasyShopSalesForDate } from "@/lib/sources/easyshop";
-import { syncVmmsSalesForDate } from "@/lib/sources/vmms";
+import { reconcileVmmsForDate } from "@/lib/monitor";
 import { sendTelegramDailyReport } from "@/lib/telegram";
 import type {
   DailySalesMetric,
@@ -59,14 +59,14 @@ export async function runDailyReportJob(
 
     // The daily run refreshes the full previous business day before reporting,
     // so a delayed 5-minute poll cannot leave the report with partial sales.
-    const [vmmsSales, easyShopSales] = await Promise.all([
-      syncVmmsSalesForDate(reportDate),
+    const [vmmsReconciliation, easyShopSales] = await Promise.all([
+      // This full-day pass also retries a bulk-purchase alert that a normal
+      // five-minute newest-page poll may have missed.
+      reconcileVmmsForDate(reportDate),
       syncEasyShopSalesForDate(reportDate),
     ]);
-    await Promise.all([
-      storeSalesTransactions(vmmsSales),
-      storeSalesTransactions(easyShopSales),
-    ]);
+    const vmmsSales = vmmsReconciliation.check.sales;
+    await storeSalesTransactions(easyShopSales);
 
     const report = await buildDailySalesReport(reportDate);
     await saveDailyReportPayload(report);
