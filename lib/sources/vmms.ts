@@ -75,7 +75,11 @@ function makeVmmsCheck(
   productMappings: Map<string, string>,
   reconciliation: boolean,
 ): SourceCheckResult {
-  const events = rows.filter(isBulkPurchase).map(toMonitorEvent);
+  // The VMMS API returns the physical slot label. A bulk sale can therefore
+  // only become `일괄 구매` after applying the persisted column mapping.
+  const events = rows
+    .filter((row) => isBulkPurchase(row, productMappings))
+    .map((row) => toMonitorEvent(row, productMappings));
   return {
     source: "vmms",
     checkedAt,
@@ -166,16 +170,18 @@ async function fetchPage(jar: CookieJar, pageNo: number, date: string): Promise<
   };
 }
 
-function isBulkPurchase(row: VmmsRow) {
+function isBulkPurchase(row: VmmsRow, productMappings: Map<string, string>) {
   const configuredValue = config.vmms.bulkValue;
   const fieldValue = asText(row[config.vmms.bulkField]);
   const knownTypeFields = ["input_type", "type", "transaction_type", "pay_type"]
     .map((field) => asText(row[field]));
+  const mappedProduct = productMappings.get(asText(row.col_no)) ?? "";
   const textFields = [
     ...knownTypeFields,
     asText(row.pay_step),
     asText(row.product),
     asText(row.item_name),
+    mappedProduct,
   ].join(" ");
 
   return fieldValue === configuredValue ||
@@ -183,12 +189,13 @@ function isBulkPurchase(row: VmmsRow) {
     /일괄\s*구매/.test(textFields);
 }
 
-function toMonitorEvent(row: VmmsRow): MonitorEvent {
+function toMonitorEvent(row: VmmsRow, productMappings: Map<string, string>): MonitorEvent {
   const transactionNo = asText(row.transaction_no) || asText(row.terminal_trans_seq);
   const terminalId = asText(row.terminal_id);
   const rawTime = asText(row.transaction_date);
   const amount = toNumber(row.amount, 0);
   const typeValue = asText(row[config.vmms.bulkField]) || asText(row.input_type) || asText(row.type);
+  const mappedProduct = productMappings.get(asText(row.col_no))?.trim();
   return {
     source: "vmms",
     kind: "vmms_bulk_purchase",
@@ -200,7 +207,7 @@ function toMonitorEvent(row: VmmsRow): MonitorEvent {
       transactionNo: transactionNo || null,
       terminalId: terminalId || null,
       transactionType: typeValue || config.vmms.bulkValue,
-      product: asText(row.product) || null,
+      product: mappedProduct || asText(row.product) || null,
       status: asText(row.pay_step) || null,
     },
   };
