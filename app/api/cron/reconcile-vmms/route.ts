@@ -1,4 +1,5 @@
 import { config } from "@/lib/config";
+import { dailyReportForDate } from "@/lib/db";
 import { reconcileVmmsForDate } from "@/lib/monitor";
 
 export const runtime = "nodejs";
@@ -18,7 +19,11 @@ export async function GET(request: Request) {
   }
 
   try {
-    const result = await reconcileVmmsForDate(date);
+    const detail = new URL(request.url).searchParams.get("detail") === "1";
+    const [result, dailyReport] = await Promise.all([
+      reconcileVmmsForDate(date),
+      detail ? dailyReportForDate(date) : Promise.resolve(null),
+    ]);
     return Response.json({
       ok: true,
       date,
@@ -26,6 +31,25 @@ export async function GET(request: Request) {
       matchedTransactions: Number(result.check.metadata?.matchedTransactions ?? 0),
       insertedEvents: result.insertedEvents,
       telegramSent: result.telegramSent,
+      ...(detail
+        ? {
+            transactions: result.check.sales.map((transaction) => ({
+              occurredAt: transaction.occurredAt,
+              amount: transaction.amount,
+              transactionType: transaction.details.transactionType ?? null,
+              status: transaction.status,
+              product: transaction.productName,
+            })),
+            dailyReport: dailyReport
+              ? {
+                  status: dailyReport.status,
+                  generatedAt: dailyReport.generatedAt,
+                  sentAt: dailyReport.sentAt,
+                  error: dailyReport.error,
+                }
+              : null,
+          }
+        : {}),
     });
   } catch (error) {
     return Response.json(
