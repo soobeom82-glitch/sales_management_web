@@ -268,6 +268,22 @@ export async function recentRuns(limit = 12): Promise<RunRow[]> {
   ` as unknown as RunRow[];
 }
 
+export async function easyShopRunsForKstRange(fromKst: string, toKst: string) {
+  if (!config.databaseUrl) return [];
+  await ensureSchema();
+  const sql = sqlClient();
+  return await sql`
+    SELECT
+      started_at AS "startedAt", finished_at AS "finishedAt", ok,
+      event_count AS "eventCount", error, metadata
+    FROM monitor_runs
+    WHERE source = 'easyshop'
+      AND started_at >= (${fromKst}::timestamp AT TIME ZONE 'Asia/Seoul')
+      AND started_at < (${toKst}::timestamp AT TIME ZONE 'Asia/Seoul')
+    ORDER BY started_at ASC
+  ` as unknown as Array<RunRow & { metadata: Record<string, unknown> }>;
+}
+
 export async function sourceEventCount(source: SourceName): Promise<number> {
   if (!config.databaseUrl) return 0;
   await ensureSchema();
