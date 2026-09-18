@@ -38,7 +38,6 @@ type SalesWindow = {
   toTime?: string;
 };
 
-const EASYSHOP_LOOKBACK_MINUTES = 15;
 const EASYSHOP_RELOGIN_ATTEMPTS = 2;
 const EASYSHOP_RELOGIN_RETRY_DELAY_MS = 1_000;
 
@@ -49,7 +48,10 @@ export async function checkEasyShopCancellations(): Promise<SourceCheckResult> {
       throw new Error("EasyShop 로그인 환경변수가 설정되지 않았습니다.");
     }
 
-    const records = await fetchEasyShopRecords(recentSalesWindows());
+    // EasyShop can publish a cancellation after its original approval is no
+    // longer inside a short rolling window. Query the current business day on
+    // each QStash run; the durable fingerprint prevents duplicate alerts.
+    const records = await fetchEasyShopRecords([{ date: compactKstDate(new Date()) }]);
     const events = records.filter((record) => record.isCanceled).map(toMonitorEvent);
     const sales = records.map(toSalesTransaction);
     return {
@@ -60,7 +62,7 @@ export async function checkEasyShopCancellations(): Promise<SourceCheckResult> {
       metadata: {
         scannedTransactions: records.length,
         matchedTransactions: events.length,
-        lookbackMinutes: EASYSHOP_LOOKBACK_MINUTES,
+        queryScope: "current_business_day",
       },
     };
   } catch (error) {
@@ -563,20 +565,6 @@ function getParameter(xml: string, id: string) {
   return decodeXml(new RegExp(`<Parameter\\s+id="${id}"[^>]*>([\\s\\S]*?)<\\/Parameter>`, "i").exec(xml)?.[1] ?? "").trim();
 }
 
-function recentSalesWindows(): SalesWindow[] {
-  const now = new Date();
-  const from = new Date(now.getTime() - EASYSHOP_LOOKBACK_MINUTES * 60 * 1000);
-  const fromDate = compactKstDate(from);
-  const toDate = compactKstDate(now);
-  if (fromDate === toDate) {
-    return [{ date: toDate, fromTime: compactKstTime(from), toTime: compactKstTime(now) }];
-  }
-  return [
-    { date: fromDate, fromTime: compactKstTime(from), toTime: "23:59:59" },
-    { date: toDate, fromTime: "00:00:00", toTime: compactKstTime(now) },
-  ];
-}
-
 function uniqueRecords(records: EasyShopRecord[]) {
   const seen = new Set<string>();
   return records.filter((record) => {
@@ -593,14 +581,6 @@ function compactKstDate(date: Date) {
   }).formatToParts(date);
   const part = (name: string) => parts.find((item) => item.type === name)?.value ?? "";
   return `${part("year")}${part("month")}${part("day")}`;
-}
-
-function compactKstTime(date: Date) {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
-  }).formatToParts(date);
-  const part = (name: string) => parts.find((item) => item.type === name)?.value ?? "00";
-  return `${part("hour")}:${part("minute")}:${part("second")}`;
 }
 
 function normalizeCompactDate(value: string) {
