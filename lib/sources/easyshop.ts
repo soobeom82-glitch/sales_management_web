@@ -74,6 +74,40 @@ export async function checkEasyShopCancellations(): Promise<SourceCheckResult> {
   }
 }
 
+// A full-day scan is used for manual recovery when EasyShop reflects a
+// cancellation after the short rolling polling window has already elapsed.
+export async function reconcileEasyShopCancellationsForDate(businessDate: string): Promise<SourceCheckResult> {
+  const checkedAt = new Date().toISOString();
+  try {
+    if (!config.easyShop.loginId || !config.easyShop.loginPassword) {
+      throw new Error("EasyShop 로그인 환경변수가 설정되지 않았습니다.");
+    }
+
+    const compactDate = normalizeCompactDate(businessDate);
+    const records = await fetchEasyShopRecords([{ date: compactDate }]);
+    const events = records.filter((record) => record.isCanceled).map(toMonitorEvent);
+    return {
+      source: "easyshop",
+      checkedAt,
+      events,
+      sales: records.map(toSalesTransaction),
+      metadata: {
+        scannedTransactions: records.length,
+        matchedTransactions: events.length,
+        reconciliation: true,
+      },
+    };
+  } catch (error) {
+    return {
+      source: "easyshop",
+      checkedAt,
+      events: [],
+      sales: [],
+      error: error instanceof Error ? error.message : "EasyShop 재검증 중 알 수 없는 오류",
+    };
+  }
+}
+
 export async function syncEasyShopSalesForDate(businessDate: string): Promise<SalesTransaction[]> {
   if (!config.easyShop.loginId || !config.easyShop.loginPassword) {
     throw new Error("EasyShop 로그인 환경변수가 설정되지 않았습니다.");
