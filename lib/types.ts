@@ -64,6 +64,7 @@ export type RunRow = {
   ok: boolean;
   eventCount: number;
   error: string | null;
+  metadata: Record<string, string | number | boolean | null>;
 };
 
 export type DailySalesMetric = {

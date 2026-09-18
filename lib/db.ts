@@ -261,27 +261,28 @@ export async function recentRuns(limit = 12): Promise<RunRow[]> {
   return await sql`
     SELECT
       id, source, started_at AS "startedAt", finished_at AS "finishedAt", ok,
-      event_count AS "eventCount", error
+      event_count AS "eventCount", error, metadata
     FROM monitor_runs
     ORDER BY started_at DESC
     LIMIT ${limit}
   ` as unknown as RunRow[];
 }
 
-export async function easyShopRunsForKstRange(fromKst: string, toKst: string) {
-  if (!config.databaseUrl) return [];
+export async function lastSuccessfulRunFinishedAt(source: SourceName): Promise<string | null> {
+  if (!config.databaseUrl) return null;
   await ensureSchema();
   const sql = sqlClient();
-  return await sql`
-    SELECT
-      started_at AS "startedAt", finished_at AS "finishedAt", ok,
-      event_count AS "eventCount", error, metadata
+  const rows = await sql`
+    SELECT finished_at AS "finishedAt"
     FROM monitor_runs
-    WHERE source = 'easyshop'
-      AND started_at >= (${fromKst}::timestamp AT TIME ZONE 'Asia/Seoul')
-      AND started_at < (${toKst}::timestamp AT TIME ZONE 'Asia/Seoul')
-    ORDER BY started_at ASC
-  ` as unknown as Array<RunRow & { metadata: Record<string, unknown> }>;
+    WHERE source = ${source}
+      AND ok = TRUE
+      AND finished_at IS NOT NULL
+    ORDER BY finished_at DESC
+    LIMIT 1
+  ` as unknown as Array<{ finishedAt: string | Date }>;
+  const value = rows[0]?.finishedAt;
+  return value instanceof Date ? value.toISOString() : value ?? null;
 }
 
 export async function sourceEventCount(source: SourceName): Promise<number> {

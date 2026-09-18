@@ -1,5 +1,6 @@
 import { CookieJar } from "@/lib/cookie-jar";
 import { config } from "@/lib/config";
+import { lastSuccessfulRunFinishedAt } from "@/lib/db";
 import type { MonitorEvent, SalesTransaction, SourceCheckResult } from "@/lib/types";
 
 type EasyShopContext = {
@@ -38,39 +39,45 @@ type SalesWindow = {
   toTime?: string;
 };
 
+const EASYSHOP_INITIAL_LOOKBACK_MINUTES = 15;
+const EASYSHOP_QUERY_OVERLAP_MINUTES = 2;
 const EASYSHOP_RELOGIN_ATTEMPTS = 2;
 const EASYSHOP_RELOGIN_RETRY_DELAY_MS = 1_000;
 
 export async function checkEasyShopCancellations(): Promise<SourceCheckResult> {
-  const checkedAt = new Date().toISOString();
+  const checkedAt = new Date();
+  let metadata: SourceCheckResult["metadata"] = {
+    queryStrategy: "previous_success_overlap",
+    queryOverlapMinutes: EASYSHOP_QUERY_OVERLAP_MINUTES,
+  };
   try {
     if (!config.easyShop.loginId || !config.easyShop.loginPassword) {
       throw new Error("EasyShop 로그인 환경변수가 설정되지 않았습니다.");
     }
 
-    // EasyShop can publish a cancellation after its original approval is no
-    // longer inside a short rolling window. Query the current business day on
-    // each QStash run; the durable fingerprint prevents duplicate alerts.
-    const records = await fetchEasyShopRecords([{ date: compactKstDate(new Date()) }]);
+    const query = await nextSalesQuery(checkedAt);
+    metadata = query.metadata;
+    const records = await fetchEasyShopRecords(query.windows);
     const events = records.filter((record) => record.isCanceled).map(toMonitorEvent);
     const sales = records.map(toSalesTransaction);
     return {
       source: "easyshop",
-      checkedAt,
+      checkedAt: checkedAt.toISOString(),
       events,
       sales,
       metadata: {
+        ...metadata,
         scannedTransactions: records.length,
         matchedTransactions: events.length,
-        queryScope: "current_business_day",
       },
     };
   } catch (error) {
     return {
       source: "easyshop",
-      checkedAt,
+      checkedAt: checkedAt.toISOString(),
       events: [],
       sales: [],
+      metadata,
       error: error instanceof Error ? error.message : "EasyShop 조회 중 알 수 없는 오류",
     };
   }
@@ -565,6 +572,50 @@ function getParameter(xml: string, id: string) {
   return decodeXml(new RegExp(`<Parameter\\s+id="${id}"[^>]*>([\\s\\S]*?)<\\/Parameter>`, "i").exec(xml)?.[1] ?? "").trim();
 }
 
+async function nextSalesQuery(now: Date) {
+  const lastSuccessfulFinishedAt = await lastSuccessfulRunFinishedAt("easyshop");
+  const previousCandidate = lastSuccessfulFinishedAt ? new Date(lastSuccessfulFinishedAt) : null;
+  const previousQueryEnd = previousCandidate && Number.isFinite(previousCandidate.getTime()) ? previousCandidate : null;
+  const baseline = previousQueryEnd ?? new Date(now.getTime() - EASYSHOP_INITIAL_LOOKBACK_MINUTES * 60 * 1000);
+  const windowStart = new Date(baseline.getTime() - EASYSHOP_QUERY_OVERLAP_MINUTES * 60 * 1000);
+  const windows = salesWindowsBetween(windowStart, now);
+
+  return {
+    windows,
+    metadata: {
+      queryStrategy: "previous_success_overlap",
+      queryStartKst: formatKstTimestamp(windowStart),
+      queryEndKst: formatKstTimestamp(now),
+      queryWindowCount: windows.length,
+      queryOverlapMinutes: EASYSHOP_QUERY_OVERLAP_MINUTES,
+      previousSuccessfulFinishedAt: previousQueryEnd?.toISOString() ?? null,
+      initialLookbackMinutes: previousQueryEnd ? null : EASYSHOP_INITIAL_LOOKBACK_MINUTES,
+    },
+  };
+}
+
+function salesWindowsBetween(from: Date, to: Date): SalesWindow[] {
+  const windows: SalesWindow[] = [];
+  let cursor = from;
+
+  while (cursor.getTime() < to.getTime()) {
+    const date = compactKstDate(cursor);
+    const startOfDay = kstMidnight(date);
+    const nextMidnight = kstMidnight(nextKstDate(date));
+    const segmentEnd = new Date(Math.min(nextMidnight.getTime(), to.getTime()));
+    const wholeDay = cursor.getTime() === startOfDay.getTime() && segmentEnd.getTime() === nextMidnight.getTime();
+
+    windows.push(wholeDay ? { date } : {
+      date,
+      fromTime: compactKstTime(cursor),
+      toTime: segmentEnd.getTime() === nextMidnight.getTime() ? "23:59:59" : compactKstTime(segmentEnd),
+    });
+    cursor = segmentEnd;
+  }
+
+  return windows;
+}
+
 function uniqueRecords(records: EasyShopRecord[]) {
   const seen = new Set<string>();
   return records.filter((record) => {
@@ -581,6 +632,31 @@ function compactKstDate(date: Date) {
   }).formatToParts(date);
   const part = (name: string) => parts.find((item) => item.type === name)?.value ?? "";
   return `${part("year")}${part("month")}${part("day")}`;
+}
+
+function compactKstTime(date: Date) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  }).formatToParts(date);
+  const part = (name: string) => parts.find((item) => item.type === name)?.value ?? "00";
+  return `${part("hour")}:${part("minute")}:${part("second")}`;
+}
+
+function formatKstTimestamp(date: Date) {
+  const compact = compactKstDate(date);
+  return `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)} ${compactKstTime(date)}`;
+}
+
+function kstMidnight(compactDate: string) {
+  const year = Number(compactDate.slice(0, 4));
+  const month = Number(compactDate.slice(4, 6));
+  const day = Number(compactDate.slice(6, 8));
+  return new Date(Date.UTC(year, month - 1, day, -9));
+}
+
+function nextKstDate(compactDate: string) {
+  const start = kstMidnight(compactDate);
+  return compactKstDate(new Date(start.getTime() + 24 * 60 * 60 * 1000));
 }
 
 function normalizeCompactDate(value: string) {
