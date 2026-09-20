@@ -31,6 +31,7 @@ type EasyShopRecord = {
   simplePaymentCategory: string;
   amount: number;
   isCanceled: boolean;
+  isExplicitCancellation: boolean;
 };
 
 type SalesWindow = {
@@ -71,11 +72,13 @@ export async function checkEasyShopCancellations(): Promise<SourceCheckResult> {
     const primaryRecords = groupRecords[0] ?? [];
     const recoveryRecords = groupRecords[1] ?? [];
     const records = uniqueRecords([...primaryRecords, ...recoveryRecords]);
-    const events = records.filter((record) => record.isCanceled).map(toMonitorEvent);
+    const cancellationRecords = alertableCancellationRecords(records);
+    const events = cancellationRecords.map(toMonitorEvent);
     console.info(
       `[easyshop] poll primary=${metadata.queryStartKst}-${metadata.queryEndKst} ` +
       `primaryCount=${primaryRecords.length} recoveryAttempted=${query.recoveryWindows.length > 0} ` +
-      `recoveryCount=${recoveryRecords.length} canceled=${events.length}`,
+      `recoveryCount=${recoveryRecords.length} cancellationCandidates=${records.filter((record) => record.isCanceled).length} ` +
+      `canceled=${events.length}`,
     );
     const sales = records.map(toSalesTransaction);
     return {
@@ -87,7 +90,7 @@ export async function checkEasyShopCancellations(): Promise<SourceCheckResult> {
         ...metadata,
         primaryScannedTransactions: primaryRecords.length,
         recoveryScannedTransactions: recoveryRecords.length,
-        recoveryMatchedTransactions: recoveryRecords.filter((record) => record.isCanceled).length,
+        recoveryMatchedTransactions: alertableCancellationRecords(recoveryRecords).length,
         scannedTransactions: records.length,
         matchedTransactions: events.length,
       },
@@ -115,7 +118,7 @@ export async function reconcileEasyShopCancellationsForDate(businessDate: string
 
     const compactDate = normalizeCompactDate(businessDate);
     const records = await fetchEasyShopRecords([{ date: compactDate }]);
-    const events = records.filter((record) => record.isCanceled).map(toMonitorEvent);
+    const events = alertableCancellationRecords(records).map(toMonitorEvent);
     return {
       source: "easyshop",
       checkedAt,
@@ -322,10 +325,10 @@ function parseSalesRecord(rowXml: string, index: number): EasyShopRecord | null 
   const easyShopCancel = fields[24] ?? "";
   const ifmType = fields[3] ?? "";
   const signedAmount = signedNumber(rawAmount);
-  const isCanceled = status.includes("취소") || ifmType === "0200" ||
+  const isExplicitCancellation = status.includes("취소") || ifmType === "0200" ||
+    signedAmount < 0 || easyShopCancel.toUpperCase() === "Y";
+  const isCanceled = isExplicitCancellation ||
     (cancelCode !== "" && !["0", "7"].includes(cancelCode)) ||
-    signedAmount < 0 ||
-    easyShopCancel.toUpperCase() === "Y" ||
     hasOriginalApprovalReference(originalApprovalDate);
 
   return {
@@ -351,6 +354,7 @@ function parseSalesRecord(rowXml: string, index: number): EasyShopRecord | null 
     simplePaymentCategory: fields[26] || "",
     amount: Math.abs(signedAmount),
     isCanceled,
+    isExplicitCancellation,
   };
 }
 
@@ -670,6 +674,29 @@ function uniqueRecords(records: EasyShopRecord[]) {
     seen.add(key);
     return true;
   });
+}
+
+// EasyShop can return both the original approval and its cancellation. The
+// approval row occasionally carries a cancellation reference even though its
+// status stays "승인". Prefer the explicit cancellation row so one real-world
+// cancellation produces one alert, while still retaining a fallback for a
+// source response that only exposes the reference row.
+function alertableCancellationRecords(records: EasyShopRecord[]) {
+  return records.filter((record) => {
+    if (!record.isCanceled || record.isExplicitCancellation) return record.isExplicitCancellation;
+    return !records.some((candidate) =>
+      candidate.isExplicitCancellation && isCancellationCompanion(candidate, record),
+    );
+  });
+}
+
+function isCancellationCompanion(left: EasyShopRecord, right: EasyShopRecord) {
+  return Boolean(
+    left.approvalNo &&
+    left.approvalNo === right.approvalNo &&
+    left.amount === right.amount &&
+    left.occurredAt?.slice(0, 10) === right.occurredAt?.slice(0, 10),
+  );
 }
 
 function compactKstDate(date: Date) {
