@@ -285,27 +285,6 @@ export async function lastSuccessfulRunFinishedAt(source: SourceName): Promise<s
   return value instanceof Date ? value.toISOString() : value ?? null;
 }
 
-// EasyShop can expose a cancellation after the transaction's original time
-// window. Keep this separate from the five-minute polling cursor so the
-// periodic same-day reconciliation is paced by its own successful run.
-export async function lastSuccessfulRecoveryFinishedAt(source: SourceName): Promise<string | null> {
-  if (!config.databaseUrl) return null;
-  await ensureSchema();
-  const sql = sqlClient();
-  const rows = await sql`
-    SELECT finished_at AS "finishedAt"
-    FROM monitor_runs
-    WHERE source = ${source}
-      AND ok = TRUE
-      AND finished_at IS NOT NULL
-      AND metadata ->> 'recoveryAttempted' = 'true'
-    ORDER BY finished_at DESC
-    LIMIT 1
-  ` as unknown as Array<{ finishedAt: string | Date }>;
-  const value = rows[0]?.finishedAt;
-  return value instanceof Date ? value.toISOString() : value ?? null;
-}
-
 export async function sourceEventCount(source: SourceName): Promise<number> {
   if (!config.databaseUrl) return 0;
   await ensureSchema();

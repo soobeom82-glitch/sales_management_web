@@ -145,8 +145,5 @@ function deliveryLabel(status: "sent" | "failed" | "pending") {
 function runSummary(run: RunRow) {
   if (run.source !== "easyshop" || !run.metadata.queryStartKst || !run.metadata.queryEndKst) return null;
   const scanned = typeof run.metadata.scannedTransactions === "number" ? ` · ${run.metadata.scannedTransactions}건` : "";
-  const recovery = run.metadata.recoveryAttempted === true
-    ? ` · 당일 재검증 ${typeof run.metadata.recoveryScannedTransactions === "number" ? `${run.metadata.recoveryScannedTransactions}건` : "실행"}`
-    : "";
-  return <small>조회 {run.metadata.queryStartKst} - {run.metadata.queryEndKst}{scanned}{recovery}</small>;
+  return <small>최근 1시간 조회 {run.metadata.queryStartKst} - {run.metadata.queryEndKst}{scanned}</small>;
 }

@@ -1,6 +1,5 @@
 import { CookieJar } from "@/lib/cookie-jar";
 import { config } from "@/lib/config";
-import { lastSuccessfulRecoveryFinishedAt, lastSuccessfulRunFinishedAt } from "@/lib/db";
 import type { MonitorEvent, SalesTransaction, SourceCheckResult } from "@/lib/types";
 
 type EasyShopContext = {
@@ -40,44 +39,29 @@ type SalesWindow = {
   toTime?: string;
 };
 
-type SalesRecordGroup = {
-  label: "primary" | "recovery";
-  windows: SalesWindow[];
-};
-
-const EASYSHOP_INITIAL_LOOKBACK_MINUTES = 15;
-const EASYSHOP_QUERY_OVERLAP_MINUTES = 2;
-const EASYSHOP_RECOVERY_INTERVAL_MINUTES = 60;
+const EASYSHOP_ROLLING_LOOKBACK_MINUTES = 60;
 const EASYSHOP_RELOGIN_ATTEMPTS = 2;
 const EASYSHOP_RELOGIN_RETRY_DELAY_MS = 1_000;
 
 export async function checkEasyShopCancellations(): Promise<SourceCheckResult> {
   const checkedAt = new Date();
   let metadata: SourceCheckResult["metadata"] = {
-    queryStrategy: "previous_success_overlap",
-    queryOverlapMinutes: EASYSHOP_QUERY_OVERLAP_MINUTES,
+    queryStrategy: "rolling_60_minutes",
+    queryLookbackMinutes: EASYSHOP_ROLLING_LOOKBACK_MINUTES,
   };
   try {
     if (!config.easyShop.loginId || !config.easyShop.loginPassword) {
       throw new Error("EasyShop 로그인 환경변수가 설정되지 않았습니다.");
     }
 
-    const query = await nextSalesQuery(checkedAt);
+    const query = nextSalesQuery(checkedAt);
     metadata = query.metadata;
-    const groups: SalesRecordGroup[] = [{ label: "primary", windows: query.primaryWindows }];
-    if (query.recoveryWindows.length > 0) {
-      groups.push({ label: "recovery", windows: query.recoveryWindows });
-    }
-    const groupRecords = await fetchEasyShopRecordGroups(groups);
-    const primaryRecords = groupRecords[0] ?? [];
-    const recoveryRecords = groupRecords[1] ?? [];
-    const records = uniqueRecords([...primaryRecords, ...recoveryRecords]);
+    const records = await fetchEasyShopRecords(query.windows);
     const cancellationRecords = alertableCancellationRecords(records);
     const events = cancellationRecords.map(toMonitorEvent);
     console.info(
-      `[easyshop] poll primary=${metadata.queryStartKst}-${metadata.queryEndKst} ` +
-      `primaryCount=${primaryRecords.length} recoveryAttempted=${query.recoveryWindows.length > 0} ` +
-      `recoveryCount=${recoveryRecords.length} cancellationCandidates=${records.filter((record) => record.isCanceled).length} ` +
+      `[easyshop] poll range=${metadata.queryStartKst}-${metadata.queryEndKst} ` +
+      `scanned=${records.length} cancellationCandidates=${records.filter((record) => record.isCanceled).length} ` +
       `canceled=${events.length}`,
     );
     const sales = records.map(toSalesTransaction);
@@ -88,9 +72,6 @@ export async function checkEasyShopCancellations(): Promise<SourceCheckResult> {
       sales,
       metadata: {
         ...metadata,
-        primaryScannedTransactions: primaryRecords.length,
-        recoveryScannedTransactions: recoveryRecords.length,
-        recoveryMatchedTransactions: alertableCancellationRecords(recoveryRecords).length,
         scannedTransactions: records.length,
         matchedTransactions: events.length,
       },
@@ -158,22 +139,13 @@ export async function syncEasyShopSalesForDate(businessDate: string): Promise<Sa
  * once, then leave any repeated failure to QStash's durable retry policy.
  */
 async function fetchEasyShopRecords(windows: SalesWindow[]): Promise<EasyShopRecord[]> {
-  const [records] = await fetchEasyShopRecordGroups([{ label: "primary", windows }]);
-  return records ?? [];
-}
-
-async function fetchEasyShopRecordGroups(groups: SalesRecordGroup[]): Promise<EasyShopRecord[][]> {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= EASYSHOP_RELOGIN_ATTEMPTS; attempt += 1) {
     try {
       const jar = new CookieJar();
       const context = await loginAndLoadContext(jar);
-      const results: EasyShopRecord[][] = [];
-      for (const group of groups) {
-        results.push(await fetchSalesForWindows(jar, context, group.windows));
-      }
-      return results;
+      return await fetchSalesForWindows(jar, context, windows);
     } catch (error) {
       lastError = error;
       if (!isConcurrentLoginError(error) || attempt === EASYSHOP_RELOGIN_ATTEMPTS) {
@@ -606,40 +578,18 @@ function getParameter(xml: string, id: string) {
   return decodeXml(new RegExp(`<Parameter\\s+id="${id}"[^>]*>([\\s\\S]*?)<\\/Parameter>`, "i").exec(xml)?.[1] ?? "").trim();
 }
 
-async function nextSalesQuery(now: Date) {
-  const [lastSuccessfulFinishedAt, lastRecoveryFinishedAt] = await Promise.all([
-    lastSuccessfulRunFinishedAt("easyshop"),
-    lastSuccessfulRecoveryFinishedAt("easyshop"),
-  ]);
-  const previousCandidate = lastSuccessfulFinishedAt ? new Date(lastSuccessfulFinishedAt) : null;
-  const previousQueryEnd = previousCandidate && Number.isFinite(previousCandidate.getTime()) ? previousCandidate : null;
-  const baseline = previousQueryEnd ?? new Date(now.getTime() - EASYSHOP_INITIAL_LOOKBACK_MINUTES * 60 * 1000);
-  const windowStart = new Date(baseline.getTime() - EASYSHOP_QUERY_OVERLAP_MINUTES * 60 * 1000);
-  const primaryWindows = salesWindowsBetween(windowStart, now);
-  const recoveryCandidate = lastRecoveryFinishedAt ? new Date(lastRecoveryFinishedAt) : null;
-  const previousRecoveryEnd = recoveryCandidate && Number.isFinite(recoveryCandidate.getTime()) ? recoveryCandidate : null;
-  const recoveryDue = !previousRecoveryEnd ||
-    now.getTime() - previousRecoveryEnd.getTime() >= EASYSHOP_RECOVERY_INTERVAL_MINUTES * 60 * 1000;
-  const recoveryDate = compactKstDate(now);
-  const recoveryWindows = recoveryDue ? [{ date: recoveryDate }] : [];
+function nextSalesQuery(now: Date) {
+  const windowStart = new Date(now.getTime() - EASYSHOP_ROLLING_LOOKBACK_MINUTES * 60 * 1000);
+  const windows = salesWindowsBetween(windowStart, now);
 
   return {
-    primaryWindows,
-    recoveryWindows,
+    windows,
     metadata: {
-      queryStrategy: "previous_success_overlap",
+      queryStrategy: "rolling_60_minutes",
       queryStartKst: formatKstTimestamp(windowStart),
       queryEndKst: formatKstTimestamp(now),
-      queryWindowCount: primaryWindows.length,
-      queryOverlapMinutes: EASYSHOP_QUERY_OVERLAP_MINUTES,
-      previousSuccessfulFinishedAt: previousQueryEnd?.toISOString() ?? null,
-      initialLookbackMinutes: previousQueryEnd ? null : EASYSHOP_INITIAL_LOOKBACK_MINUTES,
-      recoveryAttempted: recoveryDue,
-      recoveryIntervalMinutes: EASYSHOP_RECOVERY_INTERVAL_MINUTES,
-      previousRecoveryFinishedAt: previousRecoveryEnd?.toISOString() ?? null,
-      recoveryDate: recoveryDue ? compactDateToDashed(recoveryDate) : null,
-      recoveryQueryStartKst: recoveryDue ? formatKstTimestamp(kstMidnight(recoveryDate)) : null,
-      recoveryQueryEndKst: recoveryDue ? formatKstTimestamp(now) : null,
+      queryWindowCount: windows.length,
+      queryLookbackMinutes: EASYSHOP_ROLLING_LOOKBACK_MINUTES,
     },
   };
 }
