@@ -23,6 +23,12 @@ function sqlClient() {
 }
 
 export async function ensureSchema() {
+  // Production schema changes run explicitly through migrateSchema(). Running
+  // DDL and seed upserts from every serverless cold start consumed unnecessary
+  // Neon quota during the five-minute monitor cycle.
+}
+
+export async function migrateSchema() {
   if (!schemaReady) {
     schemaReady = (async () => {
       const sql = sqlClient();
@@ -98,10 +104,7 @@ export async function ensureSchema() {
       const mappingSeedStatements = VMMS_PRODUCT_MAPPING_SEED.map((mapping) => sql`
           INSERT INTO vmms_product_mappings (col_no, raw_product, actual_product)
           VALUES (${mapping.colNo}, ${mapping.rawProduct}, ${mapping.actualProduct})
-          ON CONFLICT (col_no) DO UPDATE
-          SET raw_product = EXCLUDED.raw_product,
-              actual_product = EXCLUDED.actual_product,
-              updated_at = NOW()
+          ON CONFLICT (col_no) DO NOTHING
       `);
       await sql.transaction([
         ...mappingSeedStatements,
@@ -120,13 +123,9 @@ export async function ensureSchema() {
 }
 
 export async function vmmsProductMappings(): Promise<Map<string, string>> {
-  await ensureSchema();
-  const sql = sqlClient();
-  const rows = await sql`
-    SELECT col_no AS "colNo", actual_product AS "actualProduct"
-    FROM vmms_product_mappings
-  ` as unknown as Array<{ colNo: string; actualProduct: string }>;
-  return new Map(rows.map((row) => [row.colNo, row.actualProduct]));
+  // The monitor has no runtime mapping editor. Keep the checked-in mapping in
+  // memory rather than spending one database read for every five-minute poll.
+  return new Map(VMMS_PRODUCT_MAPPING_SEED.map((mapping) => [mapping.colNo, mapping.actualProduct]));
 }
 
 export async function reserveEventDelivery(event: MonitorEvent): Promise<number | null> {
@@ -219,8 +218,16 @@ export async function storeSalesTransactions(transactions: SalesTransaction[]) {
         quantity = EXCLUDED.quantity,
         status = COALESCE(EXCLUDED.status, sales_transactions.status),
         is_canceled = sales_transactions.is_canceled OR EXCLUDED.is_canceled,
-        details = EXCLUDED.details,
-        last_seen_at = NOW()
+        details = EXCLUDED.details
+      WHERE
+        sales_transactions.occurred_at IS DISTINCT FROM COALESCE(EXCLUDED.occurred_at, sales_transactions.occurred_at)
+        OR sales_transactions.business_date IS DISTINCT FROM EXCLUDED.business_date
+        OR sales_transactions.amount IS DISTINCT FROM EXCLUDED.amount
+        OR sales_transactions.product_name IS DISTINCT FROM COALESCE(EXCLUDED.product_name, sales_transactions.product_name)
+        OR sales_transactions.quantity IS DISTINCT FROM EXCLUDED.quantity
+        OR sales_transactions.status IS DISTINCT FROM COALESCE(EXCLUDED.status, sales_transactions.status)
+        OR (NOT sales_transactions.is_canceled AND EXCLUDED.is_canceled)
+        OR sales_transactions.details IS DISTINCT FROM EXCLUDED.details
     `);
     await sql.transaction(insertQueries);
   }

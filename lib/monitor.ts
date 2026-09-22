@@ -7,7 +7,10 @@ import type { MonitorRunResult, SourceCheckResult } from "@/lib/types";
 export async function runMonitor(): Promise<MonitorRunResult> {
   const startedAt = new Date().toISOString();
   const checks = await Promise.all([checkVmmsBulkPurchases(), checkEasyShopCancellations()]);
-  const delivery = await persistAndDeliverChecks(checks, startedAt);
+  const delivery = await persistAndDeliverChecks(checks, startedAt, {
+    persistSales: false,
+    recordSuccessfulRuns: false,
+  });
   const sourceErrors = checks
     .filter((check) => check.error)
     .map((check) => `${check.source} 조회 실패: ${check.error}`);
@@ -77,15 +80,24 @@ export async function reconcileEasyShopForDate(businessDate: string): Promise<Ea
   };
 }
 
-async function persistAndDeliverChecks(checks: SourceCheckResult[], startedAt: string) {
+type PersistenceOptions = {
+  persistSales?: boolean;
+  recordSuccessfulRuns?: boolean;
+};
+
+async function persistAndDeliverChecks(
+  checks: SourceCheckResult[],
+  startedAt: string,
+  { persistSales = true, recordSuccessfulRuns = true }: PersistenceOptions = {},
+) {
   let insertedEvents = 0;
   let telegramSent = 0;
   const deliveryErrors: string[] = [];
 
   for (const check of checks) {
     const finishedAt = new Date().toISOString();
-    await storeSalesSafely(check);
-    await recordRunSafely(check, startedAt, finishedAt);
+    if (persistSales) await storeSalesSafely(check);
+    if (recordSuccessfulRuns || check.error) await recordRunSafely(check, startedAt, finishedAt);
     for (const event of check.events) {
       const id = await reserveEventDelivery(event);
       if (id === null) continue;
