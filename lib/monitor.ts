@@ -1,5 +1,9 @@
 import { recordRun, reserveEventDelivery, updateTelegramDelivery } from "@/lib/store";
-import { checkEasyShopCancellations, reconcileEasyShopCancellationsForDate } from "@/lib/sources/easyshop";
+import {
+  checkEasyShopCancellations,
+  checkEasyShopCancellationsForRange,
+  reconcileEasyShopCancellationsForDate,
+} from "@/lib/sources/easyshop";
 import { checkVmmsBulkPurchases, reconcileVmmsBulkPurchasesForDate } from "@/lib/sources/vmms";
 import { sendTelegramAlert } from "@/lib/telegram";
 import type { MonitorRunResult, SourceCheckResult } from "@/lib/types";
@@ -63,6 +67,25 @@ export async function reconcileVmmsForDate(businessDate: string): Promise<VmmsRe
 export async function reconcileEasyShopForDate(businessDate: string): Promise<EasyShopReconciliationResult> {
   const startedAt = new Date().toISOString();
   const check = await reconcileEasyShopCancellationsForDate(businessDate);
+  const delivery = await persistAndDeliverChecks([check], startedAt, { recordSuccessfulRuns: false });
+  const failures = [
+    ...(check.error ? [`easyshop 조회 실패: ${check.error}`] : []),
+    ...delivery.errors,
+  ];
+  if (failures.length > 0) throw new Error(failures.join(" | "));
+
+  return {
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    check,
+    insertedEvents: delivery.insertedEvents,
+    telegramSent: delivery.telegramSent,
+  };
+}
+
+export async function reconcileEasyShopForRange(from: Date, to: Date): Promise<EasyShopReconciliationResult> {
+  const startedAt = new Date().toISOString();
+  const check = await checkEasyShopCancellationsForRange(from, to);
   const delivery = await persistAndDeliverChecks([check], startedAt, { recordSuccessfulRuns: false });
   const failures = [
     ...(check.error ? [`easyshop 조회 실패: ${check.error}`] : []),

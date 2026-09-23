@@ -8,8 +8,8 @@ import {
   releaseJobLock,
   updateDailyReportDelivery,
 } from "@/lib/store";
-import { syncEasyShopSalesForRange } from "@/lib/sources/easyshop";
-import { reconcileVmmsForDate } from "@/lib/monitor";
+import { checkEasyShopCancellationsForRange } from "@/lib/sources/easyshop";
+import { reconcileEasyShopForRange, reconcileVmmsForDate } from "@/lib/monitor";
 import { sendTelegramDailyReport } from "@/lib/telegram";
 import type {
   DailySalesSnapshot,
@@ -68,7 +68,7 @@ export async function runDailyReportJob(
     await ensureClosingSnapshot(shiftDate(reportDate, -1));
     await ensureClosingSnapshot(shiftDate(reportDate, -7));
 
-    const current = await collectClosingSnapshot(reportDate);
+    const current = await collectClosingSnapshot(reportDate, true);
     const report = await buildDailySalesReport(reportDate, current.snapshot);
     await saveDailyReportPayload(report, current.snapshot);
     await sendTelegramDailyReport(report);
@@ -105,22 +105,29 @@ async function ensureClosingSnapshot(reportDate: string): Promise<DailySalesSnap
   return capture.snapshot;
 }
 
-async function collectClosingSnapshot(reportDate: string): Promise<ClosingSnapshotCapture> {
+async function collectClosingSnapshot(
+  reportDate: string,
+  deliverEasyShopAlerts = false,
+): Promise<ClosingSnapshotCapture> {
   const window = closingWindow(reportDate);
   // VMMS only accepts a calendar-day filter, so read the two overlapping
   // dates and trim them to the cafe's exact 18:00-to-18:00 business window.
   // The whole-day VMMS passes also retain the missed bulk-purchase recovery.
-  const [previousVmms, currentVmms, easyShopWindowSales] = await Promise.all([
+  const easyShopCheck = deliverEasyShopAlerts
+    ? reconcileEasyShopForRange(window.start, window.end).then((result) => result.check)
+    : checkEasyShopCancellationsForRange(window.start, window.end);
+  const [previousVmms, currentVmms, easyShopWindow] = await Promise.all([
     reconcileVmmsForDate(window.startDate),
     reconcileVmmsForDate(reportDate),
-    syncEasyShopSalesForRange(window.start, window.end),
+    easyShopCheck,
   ]);
+  if (easyShopWindow.error) throw new Error(`easyshop 조회 실패: ${easyShopWindow.error}`);
   const vmmsSales = transactionsInWindow(
     [...previousVmms.check.sales, ...currentVmms.check.sales],
     window.start,
     window.end,
   );
-  const easyShopSales = transactionsInWindow(easyShopWindowSales, window.start, window.end);
+  const easyShopSales = transactionsInWindow(easyShopWindow.sales, window.start, window.end);
   return {
     snapshot: buildDailySnapshot(
       reportDate,

@@ -1,5 +1,6 @@
 import { config } from "@/lib/config";
 import { reconcileEasyShopForDate } from "@/lib/monitor";
+import { verifyQStashRequest } from "@/lib/qstash";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -12,6 +13,20 @@ export async function GET(request: Request) {
     return Response.json({ ok: false, error: "Unauthorized" }, { status: 401 });
   }
 
+  return reconcileEasyShop(request);
+}
+
+// This gives operators a safe QStash Request Builder path to replay one
+// calendar day without needing to disclose CRON_SECRET in the browser.
+export async function POST(request: Request) {
+  if (!(await verifyQStashRequest(request))) {
+    return Response.json({ ok: false, error: "Unauthorized" }, { status: 401 });
+  }
+
+  return reconcileEasyShop(request);
+}
+
+async function reconcileEasyShop(request: Request) {
   const date = new URL(request.url).searchParams.get("date") ?? "";
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     return Response.json({ ok: false, error: "date must use YYYY-MM-DD" }, { status: 400 });

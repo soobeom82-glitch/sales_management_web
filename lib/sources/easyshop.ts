@@ -146,6 +146,52 @@ export async function syncEasyShopSalesForRange(from: Date, to: Date): Promise<S
   return records.map(toSalesTransaction);
 }
 
+// A closing-window report is also a recovery pass for missed cancellations.
+// The caller decides whether those event candidates should be delivered.
+export async function checkEasyShopCancellationsForRange(from: Date, to: Date): Promise<SourceCheckResult> {
+  const checkedAt = new Date().toISOString();
+  const metadata: SourceCheckResult["metadata"] = {
+    queryStrategy: "closing_window",
+    queryStartKst: formatKstTimestamp(from),
+    queryEndKst: formatKstTimestamp(to),
+  };
+  try {
+    if (from.getTime() >= to.getTime()) {
+      throw new Error("EasyShop 매출 조회 기간의 시작 시각은 종료 시각보다 앞서야 합니다.");
+    }
+    if (!config.easyShop.loginId || !config.easyShop.loginPassword) {
+      throw new Error("EasyShop 로그인 환경변수가 설정되지 않았습니다.");
+    }
+    const records = await fetchEasyShopRecords(salesWindowsBetween(from, to));
+    const events = alertableCancellationRecords(records).map(toMonitorEvent);
+    console.info(
+      `[easyshop] closing range=${metadata.queryStartKst}-${metadata.queryEndKst} ` +
+      `scanned=${records.length} cancellationCandidates=${records.filter((record) => record.isCanceled).length} ` +
+      `canceled=${events.length}`,
+    );
+    return {
+      source: "easyshop",
+      checkedAt,
+      events,
+      sales: records.map(toSalesTransaction),
+      metadata: {
+        ...metadata,
+        scannedTransactions: records.length,
+        matchedTransactions: events.length,
+      },
+    };
+  } catch (error) {
+    return {
+      source: "easyshop",
+      checkedAt,
+      events: [],
+      sales: [],
+      metadata,
+      error: error instanceof Error ? error.message : "EasyShop 마감 구간 조회 중 알 수 없는 오류",
+    };
+  }
+}
+
 /**
  * EasyShop terminates a session when it detects the same account from another
  * IP address. Start the whole Nexacro handshake over with a fresh cookie jar
