@@ -114,7 +114,7 @@ curl -X POST https://<your-domain>/api/monitor/run \
   -H "Authorization: Bearer <MONITOR_ADMIN_TOKEN>"
 ```
 
-마감 리포트는 다음과 같이 수동 실행할 수 있습니다. `date=2026-09-02`는 `2026-09-01 18:00`부터 `2026-09-02 18:00` 직전까지를 뜻합니다.
+마감 리포트는 다음과 같이 수동 실행할 수 있습니다. 날짜를 생략하면 가장 최근에 마감된 영업일을 선택하며, `date=2026-09-02`는 `2026-09-01 18:00`부터 `2026-09-02 18:00` 직전까지를 뜻합니다. 전일·전주 비교 스냅샷이 없거나 이전 자정 기준이면 원본 API로 다시 조회해 Redis에 저장한 후 리포트를 만듭니다.
 
 ```bash
 curl -X POST "https://<your-domain>/api/reports/daily/run?date=2026-09-02" \

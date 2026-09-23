@@ -2,6 +2,7 @@ import {
   buildDailySnapshot,
   dailySnapshotForDate,
   reserveDailyReport,
+  saveDailySnapshot,
   saveDailyReportPayload,
   tryAcquireJobLock,
   releaseJobLock,
@@ -35,12 +36,16 @@ type DailyReportRunOptions = {
   force?: boolean;
 };
 
+type ClosingSnapshotCapture = {
+  snapshot: DailySalesSnapshot;
+  processedCount: number;
+};
+
 export async function runDailyReportJob(
   requestedDate?: string,
   { force = false }: DailyReportRunOptions = {},
 ): Promise<DailyReportJobResult> {
-  const reportDate = normalizeReportDate(requestedDate ?? currentKstDate());
-  const window = closingWindow(reportDate);
+  const reportDate = normalizeReportDate(requestedDate ?? latestClosedKstDate());
   const jobName = `daily-sales-report:${reportDate}`;
   let lock: Awaited<ReturnType<typeof tryAcquireJobLock>> = null;
   let reportReserved = false;
@@ -57,35 +62,22 @@ export async function runDailyReportJob(
       return { reportDate, skipped: true, reason: "already_sent", processedCount: 0 };
     }
 
-    // VMMS only accepts a calendar-day filter, so read the two overlapping
-    // dates and trim them to the cafe's exact 18:00-to-18:00 business window.
-    // The whole-day VMMS passes also retain the missed bulk-purchase recovery.
-    const [previousVmms, currentVmms, easyShopWindowSales] = await Promise.all([
-      reconcileVmmsForDate(window.startDate),
-      reconcileVmmsForDate(reportDate),
-      syncEasyShopSalesForRange(window.start, window.end),
-    ]);
-    const vmmsSales = transactionsInWindow(
-      [...previousVmms.check.sales, ...currentVmms.check.sales],
-      window.start,
-      window.end,
-    );
-    const easyShopSales = transactionsInWindow(easyShopWindowSales, window.start, window.end);
-    const snapshot = buildDailySnapshot(
-      reportDate,
-      [...vmmsSales, ...easyShopSales],
-      window.start.toISOString(),
-      window.end.toISOString(),
-    );
-    const report = await buildDailySalesReport(reportDate, snapshot);
-    await saveDailyReportPayload(report, snapshot);
+    // Fill comparison periods once from the source APIs after a new closing
+    // rule is introduced or when a scheduled snapshot was missed. EasyShop
+    // allows one active session per account, so keep the full-day reads serial.
+    await ensureClosingSnapshot(shiftDate(reportDate, -1));
+    await ensureClosingSnapshot(shiftDate(reportDate, -7));
+
+    const current = await collectClosingSnapshot(reportDate);
+    const report = await buildDailySalesReport(reportDate, current.snapshot);
+    await saveDailyReportPayload(report, current.snapshot);
     await sendTelegramDailyReport(report);
     await updateDailyReportDelivery(reportDate, "sent");
 
     return {
       reportDate,
       skipped: false,
-      processedCount: vmmsSales.length + easyShopSales.length,
+      processedCount: current.processedCount,
       report,
     };
   } catch (error) {
@@ -99,6 +91,45 @@ export async function runDailyReportJob(
       });
     }
   }
+}
+
+async function ensureClosingSnapshot(reportDate: string): Promise<DailySalesSnapshot> {
+  const existing = await dailySnapshotForDate(reportDate);
+  if (isClosingSnapshot(existing, reportDate)) return existing;
+
+  const capture = await collectClosingSnapshot(reportDate);
+  await saveDailySnapshot(capture.snapshot);
+  console.info(
+    `[daily-report] comparison snapshot saved date=${reportDate} transactions=${capture.processedCount}`,
+  );
+  return capture.snapshot;
+}
+
+async function collectClosingSnapshot(reportDate: string): Promise<ClosingSnapshotCapture> {
+  const window = closingWindow(reportDate);
+  // VMMS only accepts a calendar-day filter, so read the two overlapping
+  // dates and trim them to the cafe's exact 18:00-to-18:00 business window.
+  // The whole-day VMMS passes also retain the missed bulk-purchase recovery.
+  const [previousVmms, currentVmms, easyShopWindowSales] = await Promise.all([
+    reconcileVmmsForDate(window.startDate),
+    reconcileVmmsForDate(reportDate),
+    syncEasyShopSalesForRange(window.start, window.end),
+  ]);
+  const vmmsSales = transactionsInWindow(
+    [...previousVmms.check.sales, ...currentVmms.check.sales],
+    window.start,
+    window.end,
+  );
+  const easyShopSales = transactionsInWindow(easyShopWindowSales, window.start, window.end);
+  return {
+    snapshot: buildDailySnapshot(
+      reportDate,
+      [...vmmsSales, ...easyShopSales],
+      window.start.toISOString(),
+      window.end.toISOString(),
+    ),
+    processedCount: vmmsSales.length + easyShopSales.length,
+  };
 }
 
 export async function buildDailySalesReport(
@@ -218,12 +249,13 @@ function compareProducts(current: ProductSalesMetric[], previous: ProductSalesMe
   };
 }
 
-function currentKstDate() {
+function latestClosedKstDate() {
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit",
+    timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23",
   }).formatToParts(new Date());
   const part = (name: string) => parts.find((item) => item.type === name)?.value ?? "";
-  return `${part("year")}-${part("month")}-${part("day")}`;
+  const today = `${part("year")}-${part("month")}-${part("day")}`;
+  return Number(part("hour")) >= 18 ? today : shiftDate(today, -1);
 }
 
 function closingWindow(reportDate: string) {

@@ -224,6 +224,24 @@ export async function dailySnapshotForDate(reportDate: string): Promise<DailySal
   return row?.snapshot ?? null;
 }
 
+// Comparison snapshots may be collected before their own report is sent. They
+// share the daily-report key so a later report can reuse the compact aggregate.
+export async function saveDailySnapshot(snapshot: DailySalesSnapshot) {
+  const store = await redis();
+  const key = dailyReportKey(snapshot.reportDate);
+  const existing = parseJson<StoredDailyReport>(await store.get(key));
+  const next: StoredDailyReport = {
+    reportDate: snapshot.reportDate,
+    status: existing?.status ?? "pending",
+    payload: existing?.payload ?? null,
+    generatedAt: existing?.generatedAt ?? null,
+    sentAt: existing?.sentAt ?? null,
+    error: existing?.error ?? null,
+    snapshot,
+  };
+  await store.set(key, JSON.stringify(next), { EX: DAILY_REPORT_TTL_SECONDS });
+}
+
 export async function saveDailyReportPayload(report: DailySalesReport, snapshot: DailySalesSnapshot) {
   const store = await redis();
   const key = dailyReportKey(report.reportDate);
