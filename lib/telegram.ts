@@ -50,7 +50,8 @@ function formatTelegramMessage(event: MonitorEvent): string {
 
 function formatDailyReportMessage(report: DailySalesReport): string {
   const lines = [
-    `[${formatReportDate(report.reportDate)} 일일 판매 리포트]`,
+    `[${formatReportDate(report.reportDate)} 마감 판매 리포트]`,
+    `집계: ${formatReportWindow(report.periodStart, report.periodEnd)}`,
     "정상 거래 기준 · 취소 거래 별도 표기",
   ];
 
@@ -121,6 +122,13 @@ function formatReportDate(value: string) {
   return new Intl.DateTimeFormat("ko-KR", {
     timeZone: "Asia/Seoul", month: "numeric", day: "numeric", weekday: "short",
   }).format(date);
+}
+
+function formatReportWindow(start: string, end: string) {
+  const formatter = new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false,
+  });
+  return `${formatter.format(new Date(start))} ~ ${formatter.format(new Date(end))}`;
 }
 
 function money(amount: number) {

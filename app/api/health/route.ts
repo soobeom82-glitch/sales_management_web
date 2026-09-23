@@ -20,7 +20,7 @@ export async function GET() {
       dailyReport: {
         provider: "Vercel Cron",
         endpoint: "/api/cron/daily-report",
-        schedule: "0 0 * * * UTC (09:00 KST target)",
+        schedule: "30 9 * * * UTC (18:30 KST target)",
       },
     },
   });

@@ -19,10 +19,10 @@ QStash Schedule (every 5 minutes)
   -> runBatchJob()
   -> VMMS / EasyShop checks and Telegram alerts
 
-Vercel Cron (00:00 UTC, 09:00 KST target)
+Vercel Cron (09:30 UTC, 18:30 KST target)
   -> GET /api/cron/daily-report on Vercel
   -> CRON_SECRET authorization verification
-  -> refresh the full previous business day from both sources
+  -> refresh the cafe closing window: previous day 18:00 through current day 18:00 KST
   -> write one compact daily aggregate and generate Telegram daily report
 ```
 
@@ -82,7 +82,7 @@ Schedule을 수정하거나 삭제할 때는 QStash Console의 Schedules 메뉴�
 
 ## 일일 판매 리포트
 
-일일 리포트는 전날의 정상 거래를 기준으로 VMMS와 EasyShop을 **합산하지 않고 출처별로** 표시합니다. 두 출처에 같은 결제 데이터가 포함될 수 있어 단순 합산은 중복 집계 위험이 있기 때문입니다.
+일일 리포트는 카페 마감 기준인 **전날 18:00부터 당일 18:00 직전까지**의 정상 거래를 기준으로 VMMS와 EasyShop을 **합산하지 않고 출처별로** 표시합니다. 두 출처에 같은 결제 데이터가 포함될 수 있어 단순 합산은 중복 집계 위험이 있기 때문입니다.
 
 - 매출, 거래 건수, 객단가
 - 전일 및 지난주 같은 요일 대비 매출 증감
@@ -93,9 +93,9 @@ Schedule을 수정하거나 삭제할 때는 QStash Console의 Schedules 메뉴�
 
 VMMS는 응답의 `product` 대신 `col_no` 기반 실제 상품 매핑을 적용해 상품 분석합니다. EasyShop 응답에는 상품명이 포함되지 않으므로, 상품별 분석은 VMMS에만 표시됩니다. 첫 7일 동안은 지난주 같은 요일 데이터가 부족해 상품 증감 대신 `비교 데이터 수집 중`으로 표시될 수 있습니다.
 
-원본 거래 레코드는 저장하지 않습니다. 리포트를 만들 때만 전일 24시간 거래를 전체 조회해, 출처별 매출·취소·피크 시간과 VMMS 상품별 합계를 하나의 일일 스냅샷으로 저장합니다. 스냅샷·일일 리포트·알림 이력은 35일 후 자동 만료됩니다.
+원본 거래 레코드는 저장하지 않습니다. 리포트를 만들 때만 위 24시간 마감 구간의 거래를 조회해, 출처별 매출·취소·피크 시간과 VMMS 상품별 합계를 하나의 일일 스냅샷으로 저장합니다. 기존 자정 기준 스냅샷은 새 마감 기준 비교에서 자동 제외됩니다. 스냅샷·일일 리포트·알림 이력은 35일 후 자동 만료됩니다.
 
-`vercel.json`의 Vercel Cron이 매일 `00:00 UTC`(한국 시간 09:00)을 목표로 전날 리포트를 실행합니다. Hobby 플랜은 실제 실행 시점이 해당 시간대 안에서 지연될 수 있습니다. Vercel 프로젝트 Production 환경에 `CRON_SECRET`을 등록해야 인증된 실행이 가능합니다.
+`vercel.json`의 Vercel Cron이 매일 `09:30 UTC`(한국 시간 18:30)을 목표로 당일 마감 리포트를 실행하고, `09:45 UTC`(18:45)에 한 번 재시도합니다. 리포트는 `[전날 18:00, 당일 18:00)` 구간으로 집계하므로 정확히 18:00에 발생한 거래는 다음 마감일에 포함됩니다. Hobby 플랜은 실제 실행 시점이 해당 시간대 안에서 지연될 수 있습니다. Vercel 프로젝트 Production 환경에 `CRON_SECRET`을 등록해야 인증된 실행이 가능합니다.
 
 리포트 기준일마다 Redis에 발송 상태를 저장하므로, Vercel Cron 재시도나 중복 호출에도 이미 성공한 리포트는 다시 보내지 않습니다.
 
@@ -114,7 +114,7 @@ curl -X POST https://<your-domain>/api/monitor/run \
   -H "Authorization: Bearer <MONITOR_ADMIN_TOKEN>"
 ```
 
-전일 리포트는 다음과 같이 수동 실행할 수 있습니다. 특정 기준일을 시험할 때는 `date`를 추가합니다.
+마감 리포트는 다음과 같이 수동 실행할 수 있습니다. `date=2026-09-02`는 `2026-09-01 18:00`부터 `2026-09-02 18:00` 직전까지를 뜻합니다.
 
 ```bash
 curl -X POST "https://<your-domain>/api/reports/daily/run?date=2026-09-02" \

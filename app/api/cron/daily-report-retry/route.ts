@@ -4,8 +4,8 @@ import { runDailyReportJob } from "@/lib/reports/daily-report";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-// A 09:15 KST fallback. When the 09:00 run already sent the report, the
-// durable daily_reports reservation returns `already_sent` without re-sending.
+// An 18:45 KST fallback. When the 18:30 run already sent the report, the
+// Redis reservation returns `already_sent` without re-sending.
 export async function GET(request: Request) {
   const authorization = request.headers.get("authorization");
   if (!config.cronSecret || authorization !== `Bearer ${config.cronSecret}`) {

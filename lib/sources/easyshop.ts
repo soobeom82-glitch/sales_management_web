@@ -133,6 +133,19 @@ export async function syncEasyShopSalesForDate(businessDate: string): Promise<Sa
   return records.map(toSalesTransaction);
 }
 
+// The daily report follows the cafe's 18:00 closing boundary, unlike the
+// calendar-day data displayed by EasyShop itself.
+export async function syncEasyShopSalesForRange(from: Date, to: Date): Promise<SalesTransaction[]> {
+  if (from.getTime() >= to.getTime()) {
+    throw new Error("EasyShop 매출 조회 기간의 시작 시각은 종료 시각보다 앞서야 합니다.");
+  }
+  if (!config.easyShop.loginId || !config.easyShop.loginPassword) {
+    throw new Error("EasyShop 로그인 환경변수가 설정되지 않았습니다.");
+  }
+  const records = await fetchEasyShopRecords(salesWindowsBetween(from, to));
+  return records.map(toSalesTransaction);
+}
+
 /**
  * EasyShop terminates a session when it detects the same account from another
  * IP address. Start the whole Nexacro handshake over with a fresh cookie jar

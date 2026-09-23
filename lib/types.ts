@@ -95,6 +95,8 @@ export type SourceReportHealth = {
 export type DailySalesReport = {
   reportDate: string;
   generatedAt: string;
+  periodStart: string;
+  periodEnd: string;
   sources: Array<DailySalesMetric & {
     previousDay: DailySalesMetric;
     previousWeek: DailySalesMetric;
@@ -129,5 +131,7 @@ export type DailySnapshotSource = {
 export type DailySalesSnapshot = {
   reportDate: string;
   capturedAt: string;
+  periodStart: string;
+  periodEnd: string;
   sources: DailySnapshotSource[];
 };

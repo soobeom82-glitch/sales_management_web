@@ -160,10 +160,17 @@ export async function recentRuns(limit = 12): Promise<RunRow[]> {
   });
 }
 
-export function buildDailySnapshot(reportDate: string, transactions: SalesTransaction[]): DailySalesSnapshot {
+export function buildDailySnapshot(
+  reportDate: string,
+  transactions: SalesTransaction[],
+  periodStart: string,
+  periodEnd: string,
+): DailySalesSnapshot {
   return {
     reportDate,
     capturedAt: new Date().toISOString(),
+    periodStart,
+    periodEnd,
     sources: (["vmms", "easyshop"] as SourceName[]).map((source) => {
       const sourceTransactions = transactions.filter((transaction) => transaction.source === source);
       const completed = sourceTransactions.filter((transaction) => !transaction.isCanceled);
