@@ -43,7 +43,7 @@ export type MonitorRunResult = {
 };
 
 export type EventRow = {
-  id: number;
+  id: string;
   source: SourceName;
   kind: AlertKind;
   fingerprint: string;
@@ -57,7 +57,7 @@ export type EventRow = {
 };
 
 export type RunRow = {
-  id: number;
+  id: string;
   source: SourceName;
   startedAt: string;
   finishedAt: string | null;
@@ -114,4 +114,20 @@ export type DailyReportRow = {
   generatedAt: string | null;
   sentAt: string | null;
   error: string | null;
+};
+
+// One compact snapshot is retained per completed business day. The report
+// never needs the full transaction ledger after these aggregates are built.
+export type DailySnapshotSource = {
+  source: SourceName;
+  metrics: DailySalesMetric;
+  products: ProductSalesMetric[];
+  peakHour: number | null;
+  peakHourAmount: number;
+};
+
+export type DailySalesSnapshot = {
+  reportDate: string;
+  capturedAt: string;
+  sources: DailySnapshotSource[];
 };

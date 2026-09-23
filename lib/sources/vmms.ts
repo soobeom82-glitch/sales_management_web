@@ -1,6 +1,6 @@
 import { CookieJar } from "@/lib/cookie-jar";
 import { config } from "@/lib/config";
-import { vmmsProductMappings } from "@/lib/db";
+import { vmmsProductMappings } from "@/lib/store";
 import type { MonitorEvent, SalesTransaction, SourceCheckResult } from "@/lib/types";
 
 type VmmsRow = Record<string, unknown>;

@@ -1,14 +1,11 @@
 import { config, missingMonitorConfiguration } from "@/lib/config";
-import { recentEvents, recentRuns } from "@/lib/db";
-import type { RunRow } from "@/lib/types";
+import { recentEvents, recentRuns } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
-export default async function HomePage({ searchParams }: { searchParams: Promise<{ history?: string }> }) {
-  const { history } = await searchParams;
-  const runLimit = history === "day" ? 576 : history === "3h" ? 72 : 12;
+export default async function HomePage() {
   const missing = missingMonitorConfiguration();
-  const [events, runs] = await Promise.all([recentEvents(), recentRuns(runLimit)]);
+  const [events, runs] = await Promise.all([recentEvents(), recentRuns()]);
   const configuredSources = [
     { label: "VMMS", rule: `타입 ${config.vmms.bulkValue} 또는 상품 매핑 기준 일괄 구매 거래`, configured: Boolean(config.vmms.loginId && config.vmms.loginPassword) },
     { label: "EasyShop", rule: "취소 거래", configured: Boolean(config.easyShop.loginId && config.easyShop.loginPassword) },
@@ -86,13 +83,13 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
         <article className="panel run-panel">
           <div className="panel-heading">
             <div>
-              <p className="section-kicker">POLLING</p>
-              <h2>최근 실행</h2>
+              <p className="section-kicker">ERROR LOG</p>
+              <h2>최근 감시 오류</h2>
             </div>
-            <span>{history === "day" ? "24시간" : history === "3h" ? "3시간" : "1시간"}</span>
+            <span>최근 30일</span>
           </div>
           {runs.length === 0 ? (
-            <p className="empty">아직 실행 이력이 없습니다.</p>
+            <p className="empty">최근 감시 오류가 없습니다.</p>
           ) : (
             <div className="run-list">
               {runs.map((run) => (
@@ -101,18 +98,14 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
                   <div>
                     <strong>{run.source === "vmms" ? "VMMS" : "EasyShop"}</strong>
                     <span>{formatDate(run.startedAt)}</span>
-                    {run.error ? <small>{run.error}</small> : runSummary(run)}
+                    {run.error ? <small>{run.error}</small> : null}
                   </div>
                   <b>{run.eventCount}</b>
                 </div>
               ))}
             </div>
           )}
-          <div className="history-links" aria-label="실행 이력 범위">
-            <a href="/">1시간</a>
-            <a href="/?history=3h">3시간</a>
-            <a href="/?history=day">24시간</a>
-          </div>
+          <p className="empty">정상 5분 감시는 저장하지 않으며, 상세 실행 로그는 Vercel Runtime Logs에서 확인합니다.</p>
         </article>
       </section>
 
@@ -140,10 +133,4 @@ function formatDetails(details: Record<string, string | number | boolean | null>
 
 function deliveryLabel(status: "sent" | "failed" | "pending") {
   return status === "sent" ? "텔레그램 발송" : status === "failed" ? "발송 실패" : "발송 대기";
-}
-
-function runSummary(run: RunRow) {
-  if (run.source !== "easyshop" || !run.metadata.queryStartKst || !run.metadata.queryEndKst) return null;
-  const scanned = typeof run.metadata.scannedTransactions === "number" ? ` · ${run.metadata.scannedTransactions}건` : "";
-  return <small>최근 1시간 조회 {run.metadata.queryStartKst} - {run.metadata.queryEndKst}{scanned}</small>;
 }

@@ -1,19 +1,17 @@
 import {
-  peakHourForDate,
-  productMetricsForDate,
+  buildDailySnapshot,
+  dailySnapshotForDate,
   reserveDailyReport,
-  salesMetricsForDate,
   saveDailyReportPayload,
-  sourceHealthForDate,
-  storeSalesTransactions,
   tryAcquireJobLock,
   releaseJobLock,
   updateDailyReportDelivery,
-} from "@/lib/db";
+} from "@/lib/store";
 import { syncEasyShopSalesForDate } from "@/lib/sources/easyshop";
 import { reconcileVmmsForDate } from "@/lib/monitor";
 import { sendTelegramDailyReport } from "@/lib/telegram";
 import type {
+  DailySalesSnapshot,
   DailySalesMetric,
   DailySalesReport,
   ProductMovement,
@@ -42,13 +40,13 @@ export async function runDailyReportJob(
 ): Promise<DailyReportJobResult> {
   const reportDate = normalizeReportDate(requestedDate ?? previousKstDate());
   const jobName = `daily-sales-report:${reportDate}`;
-  let lockAcquired = false;
+  let lock: Awaited<ReturnType<typeof tryAcquireJobLock>> = null;
   let reportReserved = false;
   let failureMessage: string | undefined;
 
   try {
-    lockAcquired = await tryAcquireJobLock(jobName, DAILY_REPORT_LOCK_SECONDS);
-    if (!lockAcquired) {
+    lock = await tryAcquireJobLock(jobName, DAILY_REPORT_LOCK_SECONDS);
+    if (!lock) {
       return { reportDate, skipped: true, reason: "already_running", processedCount: 0 };
     }
 
@@ -66,10 +64,9 @@ export async function runDailyReportJob(
       syncEasyShopSalesForDate(reportDate),
     ]);
     const vmmsSales = vmmsReconciliation.check.sales;
-    await storeSalesTransactions(easyShopSales);
-
-    const report = await buildDailySalesReport(reportDate);
-    await saveDailyReportPayload(report);
+    const snapshot = buildDailySnapshot(reportDate, [...vmmsSales, ...easyShopSales]);
+    const report = await buildDailySalesReport(reportDate, snapshot);
+    await saveDailyReportPayload(report, snapshot);
     await sendTelegramDailyReport(report);
     await updateDailyReportDelivery(reportDate, "sent");
 
@@ -84,55 +81,85 @@ export async function runDailyReportJob(
     if (reportReserved) await updateDailyReportDelivery(reportDate, "failed", failureMessage);
     throw error;
   } finally {
-    if (lockAcquired) {
-      await releaseJobLock(jobName, failureMessage).catch((error) => {
+    if (lock) {
+      await releaseJobLock(lock, failureMessage).catch((error) => {
         console.error(`[daily-report] lock release failed error=${readableError(error)}`);
       });
     }
   }
 }
 
-export async function buildDailySalesReport(reportDate: string): Promise<DailySalesReport> {
+export async function buildDailySalesReport(
+  reportDate: string,
+  currentSnapshot?: DailySalesSnapshot,
+): Promise<DailySalesReport> {
   const previousDate = shiftDate(reportDate, -1);
   const previousWeekDate = shiftDate(reportDate, -7);
-  const [current, previousDay, previousWeek, currentProducts, previousWeekProducts, peaks, health] = await Promise.all([
-    salesMetricsForDate(reportDate),
-    salesMetricsForDate(previousDate),
-    salesMetricsForDate(previousWeekDate),
-    productMetricsForDate(reportDate, "vmms"),
-    productMetricsForDate(previousWeekDate, "vmms"),
-    Promise.all(SOURCES.map((source) => peakHourForDate(reportDate, source))),
-    sourceHealthForDate(reportDate),
+  const [storedCurrent, previousDay, previousWeek] = await Promise.all([
+    currentSnapshot ? Promise.resolve(currentSnapshot) : dailySnapshotForDate(reportDate),
+    dailySnapshotForDate(previousDate),
+    dailySnapshotForDate(previousWeekDate),
   ]);
+  const current = currentSnapshot ?? storedCurrent;
+  if (!current) throw new Error(`${reportDate} 일일 집계를 찾지 못했습니다.`);
 
-  const currentBySource = metricMap(current);
-  const previousDayBySource = metricMap(previousDay);
-  const previousWeekBySource = metricMap(previousWeek);
-  const productMovements = compareProducts(currentProducts, previousWeekProducts);
+  const currentBySource = snapshotSourceMap(current);
+  const previousDayBySource = snapshotSourceMap(previousDay);
+  const previousWeekBySource = snapshotSourceMap(previousWeek);
 
   return {
     reportDate,
     generatedAt: new Date().toISOString(),
-    sources: SOURCES.map((source, index) => ({
-      ...metricFor(currentBySource, source),
+    sources: SOURCES.map((source) => {
+      const currentSource = sourceFor(currentBySource, source);
+      const previousWeekSource = sourceFor(previousWeekBySource, source);
+      const productMovements = source === "vmms"
+        ? compareProducts(currentSource.products, previousWeekSource.products)
+        : { increasing: [], decreasing: [] };
+      return {
+      ...currentSource.metrics,
       previousDay: metricFor(previousDayBySource, source),
       previousWeek: metricFor(previousWeekBySource, source),
-      topProducts: source === "vmms" ? currentProducts.slice(0, 5) : [],
-      increasingProducts: source === "vmms" ? productMovements.increasing : [],
-      decreasingProducts: source === "vmms" ? productMovements.decreasing : [],
-      peakHour: peaks[index].hour,
-      peakHourAmount: peaks[index].amount,
-    })),
-    health,
+      topProducts: source === "vmms" ? currentSource.products.slice(0, 5) : [],
+      increasingProducts: productMovements.increasing,
+      decreasingProducts: productMovements.decreasing,
+      peakHour: currentSource.peakHour,
+      peakHourAmount: currentSource.peakHourAmount,
+    };
+    }),
+    // Normal five-minute polls are intentionally not stored. Source health in
+    // this report therefore reflects the full-day collection, which succeeded
+    // before this report was assembled.
+    health: [],
   };
 }
 
-function metricMap(metrics: DailySalesMetric[]) {
-  return new Map(metrics.map((metric) => [metric.source, metric]));
+function snapshotSourceMap(snapshot: DailySalesSnapshot | null) {
+  return new Map((snapshot?.sources ?? []).map((source) => [source.source, source]));
 }
 
-function metricFor(metrics: Map<SourceName, DailySalesMetric>, source: SourceName): DailySalesMetric {
-  return metrics.get(source) ?? {
+function sourceFor(
+  sources: Map<SourceName, DailySalesSnapshot["sources"][number]>,
+  source: SourceName,
+) {
+  return sources.get(source) ?? {
+    source,
+    metrics: emptyMetric(source),
+    products: [],
+    peakHour: null,
+    peakHourAmount: 0,
+  };
+}
+
+function metricFor(
+  sources: Map<SourceName, DailySalesSnapshot["sources"][number]>,
+  source: SourceName,
+): DailySalesMetric {
+  return sources.get(source)?.metrics ?? emptyMetric(source);
+}
+
+function emptyMetric(source: SourceName): DailySalesMetric {
+  return {
     source,
     salesAmount: 0,
     salesCount: 0,

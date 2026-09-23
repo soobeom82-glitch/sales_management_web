@@ -1,13 +1,13 @@
 # Sales Sentinel
 
-VMMS와 EasyShop의 오늘 거래를 감시하고, 아래 조건을 발견하면 텔레그램으로 한 번만 알리는 Vercel용 웹앱입니다. 정상·취소 거래는 판매 원장에도 저장하며, 전일 판매 리포트를 텔레그램으로 발송할 수 있습니다. 5분 감시는 QStash, 일일 리포트는 Vercel Cron이 실행합니다.
+VMMS와 EasyShop의 오늘 거래를 감시하고, 아래 조건을 발견하면 텔레그램으로 한 번만 알리는 Vercel용 웹앱입니다. 5분 감시는 QStash, 일일 리포트는 Vercel Cron이 실행합니다.
 
 | 대상 | 알림 조건 |
 | --- | --- |
 | VMMS | `VMMS_BULK_FIELD` 값이 `VMMS_BULK_VALUE`(기본 `99`)와 일치하거나 `일괄 구매`로 표기된 거래 |
 | EasyShop | 취소 상태, 취소 코드, 원승인 참조, 음수 금액, `es_can_yn=Y` 중 하나에 해당하는 거래 |
 
-중복 알림 방지를 위해 이벤트 고유 키와 전송 상태를 Postgres에 저장합니다.
+중복 알림 방지와 작업 잠금은 Redis의 짧은 TTL 키를 사용합니다. 정상 5분 감시와 원본 거래는 저장하지 않습니다.
 
 ## Batch Architecture
 
@@ -15,7 +15,7 @@ VMMS와 EasyShop의 오늘 거래를 감시하고, 아래 조건을 발견하면
 QStash Schedule (every 5 minutes)
   -> POST /api/cron/batch on Vercel
   -> QStash signature verification
-  -> Postgres distributed lock
+  -> Redis distributed lock
   -> runBatchJob()
   -> VMMS / EasyShop checks and Telegram alerts
 
@@ -23,15 +23,15 @@ Vercel Cron (00:00 UTC, 09:00 KST target)
   -> GET /api/cron/daily-report on Vercel
   -> CRON_SECRET authorization verification
   -> refresh the full previous business day from both sources
-  -> upsert sales ledger and generate Telegram daily report
+  -> write one compact daily aggregate and generate Telegram daily report
 ```
 
-`runBatchJob()`은 QStash 호출과 관리자 수동 실행이 함께 사용합니다. 잠금을 얻지 못한 실행은 `already_running`으로 성공 응답하며, 조회·DB·텔레그램 전송 실패는 HTTP 500으로 반환해 QStash 재시도가 가능하도록 합니다.
+`runBatchJob()`은 QStash 호출과 관리자 수동 실행이 함께 사용합니다. 잠금을 얻지 못한 실행은 `already_running`으로 성공 응답하며, 조회·Redis·텔레그램 전송 실패는 HTTP 500으로 반환해 QStash 재시도가 가능하도록 합니다.
 
 ## Vercel 배포 준비
 
 1. Vercel에서 이 GitHub 저장소를 Import합니다.
-2. Storage 탭에서 Neon Postgres를 연결하거나, 별도 Postgres의 `DATABASE_URL`을 추가합니다.
+2. Redis 공급자가 제공한 연결 문자열을 Production 환경변수 `REDIS_URL`로 등록합니다.
 3. `.env.example`에 적힌 환경변수를 Production 환경에 등록합니다.
 4. QStash Console에서 5분 감시용 production URL Schedule을 한 번 생성합니다.
 5. `main` 브랜치에 푸시하면 자동 배포됩니다.
@@ -41,7 +41,7 @@ Vercel Cron (00:00 UTC, 09:00 KST target)
 ### 필수 환경변수
 
 ```text
-DATABASE_URL
+REDIS_URL
 MONITOR_ADMIN_TOKEN
 CRON_SECRET
 QSTASH_CURRENT_SIGNING_KEY
@@ -91,11 +91,13 @@ Schedule을 수정하거나 삭제할 때는 QStash Console의 Schedules 메뉴�
 - 시간대별 피크 매출
 - 5분 감시 실행의 오류 여부
 
-VMMS는 응답의 `product` 대신 `col_no` 기반 실제 상품 매핑을 적용해 상품 분석합니다. 원본 `product` 값은 거래 원장 `details.rawProduct`에 보존합니다. EasyShop 응답에는 상품명이 포함되지 않으므로, 상품별 분석은 VMMS에만 표시됩니다. 첫 7일 동안은 지난주 같은 요일 데이터가 부족해 상품 증감 대신 `비교 데이터 수집 중`으로 표시될 수 있습니다.
+VMMS는 응답의 `product` 대신 `col_no` 기반 실제 상품 매핑을 적용해 상품 분석합니다. EasyShop 응답에는 상품명이 포함되지 않으므로, 상품별 분석은 VMMS에만 표시됩니다. 첫 7일 동안은 지난주 같은 요일 데이터가 부족해 상품 증감 대신 `비교 데이터 수집 중`으로 표시될 수 있습니다.
+
+원본 거래 레코드는 저장하지 않습니다. 리포트를 만들 때만 전일 24시간 거래를 전체 조회해, 출처별 매출·취소·피크 시간과 VMMS 상품별 합계를 하나의 일일 스냅샷으로 저장합니다. 스냅샷·일일 리포트·알림 이력은 35일 후 자동 만료됩니다.
 
 `vercel.json`의 Vercel Cron이 매일 `00:00 UTC`(한국 시간 09:00)을 목표로 전날 리포트를 실행합니다. Hobby 플랜은 실제 실행 시점이 해당 시간대 안에서 지연될 수 있습니다. Vercel 프로젝트 Production 환경에 `CRON_SECRET`을 등록해야 인증된 실행이 가능합니다.
 
-리포트 기준일마다 Postgres에 발송 상태를 저장하므로, Vercel Cron 재시도나 중복 호출에도 이미 성공한 리포트는 다시 보내지 않습니다.
+리포트 기준일마다 Redis에 발송 상태를 저장하므로, Vercel Cron 재시도나 중복 호출에도 이미 성공한 리포트는 다시 보내지 않습니다.
 
 ## 확인 및 수동 실행
 
@@ -119,7 +121,7 @@ curl -X POST "https://<your-domain>/api/reports/daily/run?date=2026-09-02" \
   -H "Authorization: Bearer <MONITOR_ADMIN_TOKEN>"
 ```
 
-수동 실행도 QStash와 같은 `runBatchJob()` 및 Postgres 잠금을 사용합니다. 다른 작업이 실행 중이면 오류 대신 아래와 같이 안전하게 건너뜁니다.
+수동 실행도 QStash와 같은 `runBatchJob()` 및 Redis 잠금을 사용합니다. 다른 작업이 실행 중이면 오류 대신 아래와 같이 안전하게 건너뜁니다.
 
 ```json
 { "ok": true, "skipped": true, "reason": "already_running" }
@@ -143,4 +145,4 @@ curl -i -X POST http://localhost:3000/api/cron/batch
 
 배포 환경의 `batch started`, `batch completed`, `batch failed` 로그는 Vercel Project의 Runtime Logs에서 `/api/cron/batch` 요청과 함께 확인할 수 있습니다.
 
-`/` 대시보드에서 최근 알림과 실행 이력을 확인할 수 있습니다.
+`/` 대시보드에서 최근 알림과 감시 오류 이력을 확인할 수 있습니다. 정상 5분 실행은 저장하지 않고 Vercel Runtime Logs에서 확인합니다.

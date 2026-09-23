@@ -1,4 +1,4 @@
-import { recordRun, reserveEventDelivery, storeSalesTransactions, updateTelegramDelivery } from "@/lib/db";
+import { recordRun, reserveEventDelivery, updateTelegramDelivery } from "@/lib/store";
 import { checkEasyShopCancellations, reconcileEasyShopCancellationsForDate } from "@/lib/sources/easyshop";
 import { checkVmmsBulkPurchases, reconcileVmmsBulkPurchasesForDate } from "@/lib/sources/vmms";
 import { sendTelegramAlert } from "@/lib/telegram";
@@ -8,7 +8,6 @@ export async function runMonitor(): Promise<MonitorRunResult> {
   const startedAt = new Date().toISOString();
   const checks = await Promise.all([checkVmmsBulkPurchases(), checkEasyShopCancellations()]);
   const delivery = await persistAndDeliverChecks(checks, startedAt, {
-    persistSales: false,
     recordSuccessfulRuns: false,
   });
   const sourceErrors = checks
@@ -45,7 +44,7 @@ export type EasyShopReconciliationResult = {
 export async function reconcileVmmsForDate(businessDate: string): Promise<VmmsReconciliationResult> {
   const startedAt = new Date().toISOString();
   const check = await reconcileVmmsBulkPurchasesForDate(businessDate);
-  const delivery = await persistAndDeliverChecks([check], startedAt);
+  const delivery = await persistAndDeliverChecks([check], startedAt, { recordSuccessfulRuns: false });
   const failures = [
     ...(check.error ? [`vmms 조회 실패: ${check.error}`] : []),
     ...delivery.errors,
@@ -64,7 +63,7 @@ export async function reconcileVmmsForDate(businessDate: string): Promise<VmmsRe
 export async function reconcileEasyShopForDate(businessDate: string): Promise<EasyShopReconciliationResult> {
   const startedAt = new Date().toISOString();
   const check = await reconcileEasyShopCancellationsForDate(businessDate);
-  const delivery = await persistAndDeliverChecks([check], startedAt);
+  const delivery = await persistAndDeliverChecks([check], startedAt, { recordSuccessfulRuns: false });
   const failures = [
     ...(check.error ? [`easyshop 조회 실패: ${check.error}`] : []),
     ...delivery.errors,
@@ -81,14 +80,13 @@ export async function reconcileEasyShopForDate(businessDate: string): Promise<Ea
 }
 
 type PersistenceOptions = {
-  persistSales?: boolean;
   recordSuccessfulRuns?: boolean;
 };
 
 async function persistAndDeliverChecks(
   checks: SourceCheckResult[],
   startedAt: string,
-  { persistSales = true, recordSuccessfulRuns = true }: PersistenceOptions = {},
+  { recordSuccessfulRuns = true }: PersistenceOptions = {},
 ) {
   let insertedEvents = 0;
   let telegramSent = 0;
@@ -96,7 +94,6 @@ async function persistAndDeliverChecks(
 
   for (const check of checks) {
     const finishedAt = new Date().toISOString();
-    if (persistSales) await storeSalesSafely(check);
     if (recordSuccessfulRuns || check.error) await recordRunSafely(check, startedAt, finishedAt);
     for (const event of check.events) {
       const id = await reserveEventDelivery(event);
@@ -114,16 +111,6 @@ async function persistAndDeliverChecks(
     }
   }
   return { insertedEvents, telegramSent, errors: deliveryErrors };
-}
-
-async function storeSalesSafely(check: SourceCheckResult) {
-  try {
-    await storeSalesTransactions(check.sales);
-  } catch (error) {
-    // Reporting depends on this durable ledger, so a failed write must be retried
-    // by QStash rather than silently producing an incomplete daily report.
-    throw new Error(`${check.source} 판매 원천 데이터를 저장하지 못했습니다: ${readableError(error)}`);
-  }
 }
 
 async function recordRunSafely(check: SourceCheckResult, startedAt: string, finishedAt: string) {

@@ -1,4 +1,4 @@
-import { releaseJobLock, tryAcquireJobLock } from "@/lib/db";
+import { releaseJobLock, tryAcquireJobLock } from "@/lib/store";
 import { runMonitor } from "@/lib/monitor";
 import type { MonitorRunResult } from "@/lib/types";
 
@@ -19,11 +19,11 @@ export type BatchJobResult = {
 
 export async function runBatchJob(): Promise<BatchJobResult> {
   const startedAt = new Date();
-  let acquired = false;
+  let lock: Awaited<ReturnType<typeof tryAcquireJobLock>> = null;
   let failureMessage: string | undefined;
   try {
-    acquired = await tryAcquireJobLock(JOB_NAME, LOCK_LEASE_SECONDS);
-    if (!acquired) {
+    lock = await tryAcquireJobLock(JOB_NAME, LOCK_LEASE_SECONDS);
+    if (!lock) {
       const finishedAt = new Date();
       console.info(`[batch] skipped reason=already_running startedAt=${startedAt.toISOString()} finishedAt=${finishedAt.toISOString()}`);
       return {
@@ -65,8 +65,8 @@ export async function runBatchJob(): Promise<BatchJobResult> {
     );
     throw error;
   } finally {
-    if (acquired) {
-      await releaseJobLock(JOB_NAME, failureMessage).catch((error) => {
+    if (lock) {
+      await releaseJobLock(lock, failureMessage).catch((error) => {
         console.error(`[batch] lock release failed error=${readableError(error)}`);
       });
     }
