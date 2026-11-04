@@ -96,14 +96,19 @@ function makeVmmsCheck(
 async function login(jar: CookieJar) {
   const base = config.vmms.baseUrl.replace(/\/$/, "");
   await jar.fetch(`${base}/login`, { headers: browserHeaders(`${base}/`) });
-  const url = new URL(`${base}/user/login`);
-  url.searchParams.set("id", config.vmms.loginId);
-  url.searchParams.set("pass", config.vmms.loginPassword);
+  const url = `${base}/user/login`;
+  const form = new URLSearchParams({
+    id: config.vmms.loginId,
+    pass: config.vmms.loginPassword,
+  });
   const response = await jar.fetch(url, {
+    method: "POST",
     headers: {
       ...browserHeaders(`${base}/login`),
       origin: base,
+      "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
     },
+    body: form.toString(),
   });
   if (!response.ok && response.status !== 302) {
     throw new Error(`VMMS 로그인 요청 실패 (${response.status})`);
