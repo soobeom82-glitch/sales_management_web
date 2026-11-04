@@ -2,7 +2,7 @@ import { config } from "@/lib/config";
 import { runDailyReportJob } from "@/lib/reports/daily-report";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 export async function POST(request: Request) {
   const authorization = request.headers.get("authorization");

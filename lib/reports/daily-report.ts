@@ -46,19 +46,23 @@ export async function runDailyReportJob(
   { force = false }: DailyReportRunOptions = {},
 ): Promise<DailyReportJobResult> {
   const reportDate = normalizeReportDate(requestedDate ?? latestClosedKstDate());
+  const startedAt = Date.now();
   const jobName = `daily-sales-report:${reportDate}`;
   let lock: Awaited<ReturnType<typeof tryAcquireJobLock>> = null;
   let reportReserved = false;
   let failureMessage: string | undefined;
 
   try {
+    console.info(`[daily-report] started date=${reportDate} force=${force}`);
     lock = await tryAcquireJobLock(jobName, DAILY_REPORT_LOCK_SECONDS);
     if (!lock) {
+      console.info(`[daily-report] skipped date=${reportDate} reason=already_running`);
       return { reportDate, skipped: true, reason: "already_running", processedCount: 0 };
     }
 
     reportReserved = await reserveDailyReport(reportDate, force);
     if (!reportReserved) {
+      console.info(`[daily-report] skipped date=${reportDate} reason=already_sent`);
       return { reportDate, skipped: true, reason: "already_sent", processedCount: 0 };
     }
 
@@ -74,6 +78,11 @@ export async function runDailyReportJob(
     await sendTelegramDailyReport(report);
     await updateDailyReportDelivery(reportDate, "sent");
 
+    console.info(
+      `[daily-report] completed date=${reportDate} durationMs=${Date.now() - startedAt} ` +
+        `transactions=${current.processedCount}`,
+    );
+
     return {
       reportDate,
       skipped: false,
@@ -82,6 +91,9 @@ export async function runDailyReportJob(
     };
   } catch (error) {
     failureMessage = readableError(error);
+    console.error(
+      `[daily-report] failed date=${reportDate} durationMs=${Date.now() - startedAt} error=${failureMessage}`,
+    );
     if (reportReserved) await updateDailyReportDelivery(reportDate, "failed", failureMessage);
     throw error;
   } finally {

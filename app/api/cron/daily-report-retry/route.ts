@@ -2,7 +2,7 @@ import { config } from "@/lib/config";
 import { runDailyReportJob } from "@/lib/reports/daily-report";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 // An 18:45 KST fallback. When the 18:30 run already sent the report, the
 // Redis reservation returns `already_sent` without re-sending.
