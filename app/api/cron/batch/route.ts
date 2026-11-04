@@ -2,7 +2,9 @@ import { runBatchJob } from "@/lib/batch/run-batch-job";
 import { verifyQStashRequest } from "@/lib/qstash";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+// External sales endpoints can respond slowly while the daily report is running.
+// Keep the five-minute lock as the overlap guard, but allow a delayed run to finish.
+export const maxDuration = 180;
 
 export async function POST(request: Request) {
   if (!(await verifyQStashRequest(request))) {

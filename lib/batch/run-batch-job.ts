@@ -3,7 +3,7 @@ import { runMonitor } from "@/lib/monitor";
 import type { MonitorRunResult } from "@/lib/types";
 
 const JOB_NAME = "sales-monitor";
-// The Vercel route has a 60-second maximum duration. A four-minute lease blocks overlaps
+// The Vercel route allows up to three minutes. A four-minute lease blocks overlaps
 // without keeping a failed invocation locked past the next five-minute schedule.
 const LOCK_LEASE_SECONDS = 4 * 60;
 
